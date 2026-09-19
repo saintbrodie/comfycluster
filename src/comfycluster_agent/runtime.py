@@ -164,6 +164,20 @@ class NativeWindowsRuntime:
         managed.current_prompt_id = str(prompt_id)
         return str(prompt_id)
 
+    async def cancel_job(self, worker_id: str, job_id: UUID, prompt_id: str | None) -> None:
+        managed = self._workers[worker_id]
+        target_prompt = prompt_id or managed.current_prompt_id
+        if not target_prompt:
+            raise RuntimeError(f"worker {worker_id} has no active prompt")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(f"{managed.worker.comfy_url}/api/jobs/{target_prompt}/cancel")
+            if response.status_code in {404, 405}:
+                response = await client.post(f"{managed.worker.comfy_url}/interrupt")
+            response.raise_for_status()
+        managed.worker.state = WorkerState.IDLE
+        managed.worker.current_job_id = None
+        managed.current_prompt_id = None
+
     async def poll_jobs(self) -> list[dict]:
         """Return terminal job events observed in Comfy history."""
         completed: list[dict] = []
@@ -192,6 +206,7 @@ class NativeWindowsRuntime:
                         "job_id": job_id,
                         "prompt_id": prompt_id,
                         "status": status_str,
+                        "outputs": history.get("outputs", {}) if isinstance(history, dict) else {},
                     }
                 )
                 managed.worker.state = WorkerState.IDLE

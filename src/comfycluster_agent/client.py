@@ -87,7 +87,11 @@ class AgentClient:
                     host_id=self.host_id,
                     event=terminal["event"],
                     job_id=terminal["job_id"],
-                    payload={"prompt_id": terminal["prompt_id"], "status": terminal["status"]},
+                    payload={
+                        "prompt_id": terminal["prompt_id"],
+                        "status": terminal["status"],
+                        "outputs": terminal["outputs"],
+                    },
                 )
                 await websocket.send(event.model_dump_json())
             heartbeat = HostHeartbeat(
@@ -109,6 +113,13 @@ class AgentClient:
                     command_id=command.command_id,
                     job_id=UUID(payload["job_id"]),
                     payload={"prompt_id": payload["prompt_id"]},
+                )
+            elif command.action == "job.cancel":
+                event = AgentEvent(
+                    host_id=self.host_id,
+                    event="job.canceled",
+                    command_id=command.command_id,
+                    job_id=UUID(payload["job_id"]),
                 )
             else:
                 event = AgentEvent(
@@ -155,6 +166,12 @@ class AgentClient:
             except Exception as exc:
                 raise RuntimeError(f"job {job_id} failed to submit: {exc}") from exc
             return {"job_id": str(job_id), "prompt_id": prompt_id}
+        if action == "job.cancel":
+            job_id = UUID(payload["job_id"])
+            await self.runtime.cancel_job(
+                payload["worker_id"], job_id, payload.get("prompt_id")
+            )
+            return {"job_id": str(job_id)}
         if action == "inventory.refresh":
             self.gpus = discover_gpus(self.settings.mock_gpus)
             self.comfy = discover_comfy(self.settings.comfy_home)

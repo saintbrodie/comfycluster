@@ -133,6 +133,31 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
         job = await app.state.store.create_job(JobRecord(request=request))
         return await dispatch_job(job)
 
+    @app.post("/api/v1/jobs/{job_id}/cancel", status_code=202)
+    async def cancel_job(job_id: UUID):
+        job = await app.state.store.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.state in {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}:
+            return job
+        if job.state is JobState.QUEUED:
+            return await app.state.store.set_job_state(job_id, JobState.CANCELED)
+        if not job.assigned_host_id or not job.assigned_worker_id:
+            return await app.state.store.set_job_state(job_id, JobState.CANCELED)
+        try:
+            await app.state.connections.send(
+                job.assigned_host_id,
+                "job.cancel",
+                {
+                    "job_id": str(job.job_id),
+                    "worker_id": job.assigned_worker_id,
+                    "prompt_id": job.comfy_prompt_id,
+                },
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return job
+
     @app.websocket("/api/v1/agents/ws")
     async def agent_socket(websocket: WebSocket):
         await websocket.accept()
@@ -167,11 +192,26 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
                             message.job_id,
                             JobState.SUCCEEDED,
                             error=None,
+                            outputs=message.payload.get("outputs", {}),
                         )
                         if finished and finished.assigned_host_id and finished.assigned_worker_id:
                             await app.state.store.update_worker(
                                 finished.assigned_host_id,
                                 finished.assigned_worker_id,
+                                state=WorkerState.IDLE,
+                                current_job_id=None,
+                            )
+                        await dispatch_queued_jobs()
+                    elif message.event == "job.canceled" and message.job_id:
+                        canceled = await app.state.store.set_job_state(
+                            message.job_id,
+                            JobState.CANCELED,
+                            error=None,
+                        )
+                        if canceled and canceled.assigned_host_id and canceled.assigned_worker_id:
+                            await app.state.store.update_worker(
+                                canceled.assigned_host_id,
+                                canceled.assigned_worker_id,
                                 state=WorkerState.IDLE,
                                 current_job_id=None,
                             )

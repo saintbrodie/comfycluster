@@ -151,4 +151,5 @@ class JobRecord(BaseModel):
     assigned_worker_id: str | None = None
     comfy_prompt_id: str | None = None
     error: str | None = None
+    outputs: dict[str, Any] = Field(default_factory=dict)
     request: JobSubmitRequest
