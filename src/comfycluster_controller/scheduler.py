@@ -146,7 +146,6 @@ class Scheduler:
         accrues half as much virtual runtime as a weight of 1 and receives roughly
         twice the dispatch opportunities when both groups remain backlogged.
         """
-        group_map = {group.group_id: group for group in groups}
         present: list[str | None] = []
         for job in sorted(jobs, key=lambda item: item.created_at):
             if job.group_id not in present:
