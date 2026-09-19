@@ -23,6 +23,7 @@ from .inventory import compare_release, model_matrix, node_matrix
 from .scheduler import Scheduler
 from .settings import create_configured_store
 from .store import FleetStore
+from .workflow import analyze_workflow
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -126,6 +127,10 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
             "release": manifest.get("name"),
             "hosts": [compare_release(host, manifest) for host in hosts],
         }
+
+    @app.post("/api/v1/workflows/analyze")
+    async def workflow_analyze(workflow: dict):
+        return analyze_workflow(workflow).as_dict()
 
     @app.post("/api/v1/hosts/{host_id}/commands/{action}")
     async def host_command(host_id: str, action: str, payload: dict | None = None):
