@@ -19,6 +19,7 @@ from comfycluster_common.models import (
 from comfycluster_common.protocol import parse_agent_message
 
 from .connections import AgentConnectionManager
+from .inventory import compare_release, model_matrix, node_matrix
 from .scheduler import Scheduler
 from .settings import create_configured_store
 from .store import FleetStore
@@ -109,6 +110,22 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
         if not host:
             raise HTTPException(status_code=404, detail="host not found")
         return {"host_id": host_id, "nodes": host.nodes, "models": host.models}
+
+    @app.get("/api/v1/models")
+    async def cluster_models():
+        return model_matrix(await app.state.store.list_hosts())
+
+    @app.get("/api/v1/nodes")
+    async def cluster_nodes():
+        return node_matrix(await app.state.store.list_hosts())
+
+    @app.post("/api/v1/releases/compare")
+    async def release_compare(manifest: dict):
+        hosts = await app.state.store.list_hosts()
+        return {
+            "release": manifest.get("name"),
+            "hosts": [compare_release(host, manifest) for host in hosts],
+        }
 
     @app.post("/api/v1/hosts/{host_id}/commands/{action}")
     async def host_command(host_id: str, action: str, payload: dict | None = None):
