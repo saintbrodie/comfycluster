@@ -4,7 +4,7 @@
 
 The goal is to make several GPU workstations behave like one managed Comfy resource pool without turning artists or operators into cluster administrators.
 
-> Current status: working early prototype. The Windows desktop, background agent, and controller are all packaged as standalone executables. Agents can discover GPUs and ComfyUI, launch one worker per GPU, report live capabilities, inventory models/custom nodes, and execute workflows through a global compatibility-aware scheduler. The controller persists jobs, fleet state, desired releases, and host drain state.
+> Current status: working early prototype. The Windows desktop, background agent, and controller are packaged as standalone executables. Agents discover GPUs and ComfyUI, launch one worker per GPU, report live capabilities, inventory models/custom nodes, and execute workflows through a global compatibility-aware scheduler. The controller persists jobs, fleet state, desired releases, host drain state, users, groups, memberships, and API credentials.
 
 ## Product shape
 
@@ -24,7 +24,7 @@ comfycluster-agent.exe
         | outbound authenticated WebSocket
         v
 ComfyCluster Controller
-  Desired state, fleet inventory, scheduling, releases
+  Desired state, fleet inventory, scheduling, releases, tenancy
         |
         +---- Windows PC 1 -> GPU 0 / GPU 1
         +---- Windows PC 2 -> GPU 0 / GPU 1
@@ -34,6 +34,34 @@ ComfyCluster Controller
 Closing `ComfyCluster.exe` does not stop local Comfy workers or remove the machine from the cluster. The agent keeps running in the background.
 
 Kubernetes may become a runtime for larger Linux deployments later, but it is not required. Native Windows is the first target.
+
+## Enterprise tenancy and privacy
+
+ComfyCluster treats creative teams as private groups rather than one shared queue and output namespace.
+
+- every human job is owned by a user and group
+- output/workflow metadata inherits the job's privacy scope
+- group jobs are visible only to members of that group
+- private jobs are visible only to the submitting user
+- platform administrators can inspect queue metadata without automatically receiving workflow/output content access
+- machine agent credentials are separate from human API credentials
+- user API tokens are revocable and stored as hashes in the controller database
+
+The platform administrator bootstrap token is generated separately from the agent token during controller installation.
+
+## Resource governance
+
+The global scheduler now includes the first multi-tenant controls needed to keep a busy creative enterprise usable:
+
+- per-user maximum queued jobs
+- per-user maximum running jobs
+- per-group maximum queued jobs
+- per-group maximum running jobs
+- weighted fair scheduling between backlogged groups
+- compatibility-aware worker selection still applies after tenant scheduling
+- queue-limit responses return explicit `429 queue_limit_reached` details rather than accepting an unbounded backlog
+
+A group's weight controls its relative share when multiple groups remain backlogged. Idle capacity can still be used by any eligible group when others have no runnable work.
 
 ## Desktop application
 
@@ -45,13 +73,56 @@ Implemented screens:
 - **Comfy**: detected environment, Comfy version/commit/Python, desired fleet release, drift state, inventory refresh
 - **Models**: cluster model inventory, size/category, whether the model is on this PC, host availability
 - **Custom Nodes**: local commit, host coverage, basic consistency view
-- **Outputs**: recent cluster jobs and output metadata
-- **Cluster**: all registered Windows hosts and their GPU workers, connectivity and drain state
+- **Outputs**: recent authorized cluster jobs and output metadata
+- **Cluster**: registered Windows hosts and their GPU workers, connectivity and drain state
 - **Settings**: controller/local-agent endpoints and direct controller-admin access
 
 The desktop uses the local agent API on `127.0.0.1:9321` for workstation controls, so Start/Stop/Restart remains available if the central controller is temporarily unavailable. Fleet policy such as Drain/Resume remains controller-owned.
 
-## Implemented
+## Windows deployment
+
+Controller installs generate two different bootstrap credentials:
+
+```text
+COMFYCLUSTER_AGENT_TOKEN   machine-to-controller authentication
+COMFYCLUSTER_ADMIN_TOKEN   human/API platform administration
+```
+
+Do not reuse the machine credential as a human credential.
+
+Once a user token has been issued by the admin API, it can be provisioned to a workstation desktop:
+
+```powershell
+.\install-agent.ps1 `
+  -ControllerUrl "wss://CONTROLLER/api/v1/agents/ws" `
+  -AgentToken "MACHINE-TOKEN" `
+  -UserToken "USER-TOKEN"
+```
+
+The desktop sends the user token only to controller HTTP APIs. The background agent continues using the separate agent credential.
+
+## Tenancy API
+
+Platform-admin bootstrap requests use:
+
+```text
+Authorization: Bearer <COMFYCLUSTER_ADMIN_TOKEN>
+```
+
+Important endpoints:
+
+- `GET /api/v1/me`
+- `GET /api/v1/groups`
+- `GET /api/v1/queue/summary`
+- `POST /api/v1/admin/groups`
+- `POST /api/v1/admin/users`
+- `POST /api/v1/admin/memberships`
+- `POST /api/v1/admin/users/{user_id}/tokens`
+- `DELETE /api/v1/admin/tokens/{token_id}`
+- `GET /api/v1/admin/jobs` returns operational summaries without workflow/output content
+- `GET /api/v1/jobs` returns only content the authenticated user is allowed to see
+
+## Implemented agent and controller foundations
 
 ### Windows agent
 
@@ -68,157 +139,41 @@ The desktop uses the local agent API on `127.0.0.1:9321` for workstation control
 - custom-node and model inventory, including `extra_model_paths.yaml`
 - live `/object_info` capability discovery so each worker reports the node types it can actually execute
 - optional official `comfy-cli` discovery using its structured `comfy discover` contract
-- PyInstaller Windows executable build and Scheduled Task install/uninstall scripts
 
 ### Controller
 
-- FastAPI control plane and web admin dashboard
-- outbound-agent WebSocket protocol
+- FastAPI control plane
 - host/GPU/worker inventory and disconnect handling
-- persistent host Drain/Resume state
 - cluster model and custom-node availability matrices
-- global job queue with worker reservations
-- job dispatch, completion, failure, cancellation, and output tracking
+- global tenant-aware job queue with worker reservations
+- compatibility-aware scheduling using connectivity, worker state, VRAM, models, and live registered Comfy node types
+- weighted fair group scheduling and concurrency limits
+- user/group tenancy, memberships, hashed API credentials, and scoped job visibility
 - optional SQLite persistence and restart recovery behavior
-- persisted typed desired-release manifest
-- release comparison and rollout planning for Comfy, node, and model drift
-- workflow requirement analysis for node types and model references
-- compatibility-aware scheduling using connectivity, drain state, worker state, VRAM, models, and live registered Comfy node types
-- per-worker compatibility explanations such as `missing_models`, `missing_node_types`, `insufficient_vram`, and `host_draining`
-
-### Official Comfy tooling integration
-
-ComfyCluster is intentionally a control plane around Comfy rather than a fork of it.
-
-The first `comfy-cli` adapter supports:
-
-- `comfy discover` capability/version negotiation
-- `comfy node deps-in-workflow`
-- `comfy node save-snapshot`
-- `comfy update comfy --version ...`
-
-The longer-term public execution surface should follow official Comfy API v2 semantics, and cluster-aware MCP is planned on top of the same controller.
-
-## Windows bundle
-
-GitHub Actions builds a standalone `comfycluster-windows-x64` artifact containing:
-
-```text
-ComfyCluster.exe
-comfycluster-agent.exe
-comfycluster-controller.exe
-install-agent.ps1
-uninstall-agent.ps1
-install-controller.ps1
-uninstall-controller.ps1
-README.md
-```
-
-The workstation installer copies the desktop and agent into `%LOCALAPPDATA%\ComfyCluster`, creates Desktop/Start Menu shortcuts, installs the background Scheduled Task, and launches the desktop app.
-
-See [docs/windows-deployment.md](docs/windows-deployment.md) for the current deployment flow.
-
-## Development demo
-
-Python 3.11+ is currently required for a source checkout.
-
-```powershell
-./scripts/install-dev.ps1
-./scripts/dev-demo.ps1
-```
-
-Or start the controller manually:
-
-```powershell
-.\.venv\Scripts\comfycluster-controller.exe serve --database .\comfycluster.db
-```
-
-Then in another terminal:
-
-```powershell
-.\.venv\Scripts\comfycluster-agent.exe run --mock-gpus 2
-```
-
-For desktop development, install the desktop extra and launch:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
-.\.venv\Scripts\comfycluster-desktop.exe
-```
-
-The controller admin UI is at `http://127.0.0.1:9320`. The local agent API defaults to `http://127.0.0.1:9321`.
-
-On a real Comfy machine:
-
-```powershell
-$env:COMFYCLUSTER_COMFY_HOME = "D:\AI\ComfyUI"
-.\.venv\Scripts\comfycluster-agent.exe run --controller ws://CONTROLLER:9320/api/v1/agents/ws
-```
-
-If `comfy-cli` is installed somewhere other than `PATH`:
-
-```powershell
-$env:COMFYCLUSTER_COMFY_CLI_EXECUTABLE = "C:\path\to\comfy.exe"
-```
-
-## Useful API endpoints
-
-Controller:
-
-- `GET /api/v1/health`
-- `GET /api/v1/hosts`
-- `POST /api/v1/hosts/{host}/drain`
-- `POST /api/v1/hosts/{host}/resume`
-- `GET /api/v1/workers`
-- `GET /api/v1/models`
-- `GET /api/v1/nodes`
-- `POST /api/v1/workflows/analyze`
-- `POST /api/v1/workflows/compatibility`
-- `PUT /api/v1/releases/desired`
-- `GET /api/v1/releases/desired`
-- `GET /api/v1/releases/plan`
-- `POST /api/v1/releases/compare`
-- `POST /api/v1/hosts/{host}/commands/{action}`
-- `GET /api/v1/jobs`
-- `POST /api/v1/jobs`
-- `POST /api/v1/jobs/{job}/cancel`
-- `WS /api/v1/agents/ws`
-
-Local agent:
-
-- `GET /api/v1/status`
-- `POST /api/v1/workers/{worker}/{start|stop|restart}`
-- `POST /api/v1/fleet/{start|stop}`
-- `POST /api/v1/inventory/refresh`
+- desired release and drift planning
+- host drain/resume behavior
 
 ## Design principles
 
-1. **The desktop is the user product.** Normal operators should not need to interact with service processes or cluster infrastructure.
-2. **The controller owns desired state and scheduling.**
-3. **The Windows agent owns local process/GPU supervision.**
-4. **Comfy itself remains the execution engine and graph editor.**
-5. **Official Comfy tooling handles Comfy-specific package mechanics wherever practical.**
-6. **Models are data, not application releases.** Large model synchronization is managed separately from Comfy/custom-node releases.
-7. **Workers advertise runtime truth.** `/object_info`, model inventory, GPU state, and management-tool capability determine eligibility.
-8. **A worker should require no inbound remote-management port.** Only the localhost desktop API is exposed on the workstation by default.
+1. **The controller owns desired state, authorization, quotas, and scheduling.**
+2. **The Windows agent owns local process/GPU supervision.**
+3. **Machine identity and human identity are separate security boundaries.**
+4. **Infrastructure administration does not automatically grant content access.**
+5. **Comfy itself remains the execution engine.**
+6. **Models are data, not application releases.**
+7. **Workers advertise runtime truth.**
+8. **A worker should require no inbound management port.**
 
 ## Near-term priorities
 
-1. exercise the Windows desktop bundle on the real three-PC fleet
-2. finish canary Comfy release apply/rollback on drained hosts
-3. add custom-node desired-state reconciliation
-4. add controller-triggered model synchronization with hashing and integrity verification
-5. improve the Outputs page into a real image/video gallery with metadata and workflow reload
-6. add first-run desktop enrollment/setup instead of PowerShell being the primary onboarding surface
-7. expose a cluster-level Comfy API v2-compatible surface
-8. serve one unified Comfy workspace backed by the global scheduler
-9. add cluster-aware MCP and gated agentic administration
-
-See [docs/architecture.md](docs/architecture.md) and [docs/roadmap.md](docs/roadmap.md).
-
-## Prior art
-
-ComfyCluster deliberately borrows proven ideas from SwarmUI, ComfyDeploy, distributed Comfy schedulers, Stability Matrix, Salad's Comfy API wrapper, the Windows Comfy portable installer ecosystem, and official Comfy projects such as `comfy-cli`, `comfy-api-proxy`, and `comfy-mcp`.
+1. desktop sign-in/token management and group-aware queue UI
+2. central output asset storage with the same authorization rules as jobs
+3. SSO/OIDC integration so enterprises do not have to manually provision long-lived user tokens
+4. group administration UI, audit log, and usage accounting
+5. canary release reconciliation and rollback
+6. model synchronization with hashing and integrity verification
+7. cluster-level Comfy API v2-compatible surface
+8. unified Comfy workspace and cluster-aware MCP
 
 ## License
 
