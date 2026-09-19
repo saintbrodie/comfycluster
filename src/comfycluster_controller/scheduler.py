@@ -36,6 +36,16 @@ class Scheduler:
                 continue
             if any(not host_has_model(host, model_ref) for model_ref in requirements.model_refs):
                 continue
+
+            # When the agent has queried /object_info, treat that capability set
+            # as runtime truth. An empty list means an older/not-yet-ready agent,
+            # so we retain backwards-compatible scheduling rather than making the
+            # whole fleet unavailable during rolling upgrades.
+            if worker.node_types:
+                available = set(worker.node_types)
+                if not requirements.node_types.issubset(available):
+                    continue
+
             candidates.append(Candidate(host=host, worker=worker, free_vram_mb=gpu.memory_free_mb))
 
         if not candidates:

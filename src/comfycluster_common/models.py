@@ -78,6 +78,10 @@ class WorkerSnapshot(BaseModel):
     comfy_url: str | None = None
     current_job_id: UUID | None = None
     error: str | None = None
+    # Populated from ComfyUI /object_info once a worker is ready. This gives
+    # the scheduler a runtime-truth capability set rather than guessing which
+    # Python package provides a workflow node.
+    node_types: list[str] = Field(default_factory=list)
 
 
 class HostRegistration(BaseModel):

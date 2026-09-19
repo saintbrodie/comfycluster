@@ -75,3 +75,35 @@ def test_scheduler_requires_referenced_model():
     candidate = scheduler.choose(request, [(host_a, worker_a), (host_b, worker_b)])
     assert candidate is not None
     assert candidate.host.host_id == "b"
+
+
+def test_scheduler_requires_runtime_node_capability_when_known():
+    scheduler = Scheduler()
+    host_a, worker_a = _host("a", "GPU-A", 32768, 0, WorkerState.IDLE)
+    host_b, worker_b = _host("b", "GPU-B", 32768, 1000, WorkerState.IDLE)
+    worker_a.node_types = ["CheckpointLoaderSimple", "KSampler"]
+    worker_b.node_types = ["CheckpointLoaderSimple", "KSampler", "FancyCustomNode"]
+    request = JobSubmitRequest(
+        workflow={
+            "1": {"class_type": "FancyCustomNode", "inputs": {}},
+        }
+    )
+
+    candidate = scheduler.choose(request, [(host_a, worker_a), (host_b, worker_b)])
+
+    assert candidate is not None
+    assert candidate.host.host_id == "b"
+
+
+def test_scheduler_keeps_backwards_compatibility_without_capability_inventory():
+    scheduler = Scheduler()
+    host, worker = _host("a", "GPU-A", 32768, 0, WorkerState.IDLE)
+    request = JobSubmitRequest(
+        workflow={
+            "1": {"class_type": "FancyCustomNode", "inputs": {}},
+        }
+    )
+
+    candidate = scheduler.choose(request, [(host, worker)])
+
+    assert candidate is not None

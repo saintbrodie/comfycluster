@@ -67,6 +67,7 @@ class NativeWindowsRuntime:
             else:
                 managed.worker.pid = None
                 managed.worker.state = WorkerState.ERROR if return_code else WorkerState.STOPPED
+                managed.worker.node_types = []
                 managed.process = None
                 if managed.log_handle:
                     managed.log_handle.close()
@@ -93,6 +94,7 @@ class NativeWindowsRuntime:
             "--disable-auto-launch",
         ]
         managed.worker.state = WorkerState.STARTING
+        managed.worker.node_types = []
         try:
             managed.process = subprocess.Popen(
                 args,
@@ -124,6 +126,7 @@ class NativeWindowsRuntime:
         managed.worker.current_job_id = None
         managed.current_prompt_id = None
         managed.worker.state = WorkerState.STOPPED
+        managed.worker.node_types = []
         if managed.log_handle:
             managed.log_handle.close()
             managed.log_handle = None
@@ -215,14 +218,30 @@ class NativeWindowsRuntime:
         return completed
 
     async def probe_workers(self) -> None:
+        """Probe liveness and cache each worker's actual registered node types.
+
+        /object_info is intentionally fetched only until we have a capability
+        set. A restart clears the cache because custom-node availability may
+        have changed between process launches.
+        """
         self._refresh_process_state()
-        async with httpx.AsyncClient(timeout=1.5) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             for managed in self._workers.values():
                 if not managed.process or managed.process.poll() is not None:
                     continue
                 try:
                     response = await client.get(f"{managed.worker.comfy_url}/system_stats")
-                    if response.is_success and managed.worker.state is WorkerState.STARTING:
+                    if not response.is_success:
+                        continue
+                    if not managed.worker.node_types:
+                        object_info = await client.get(f"{managed.worker.comfy_url}/object_info")
+                        if object_info.is_success:
+                            body = object_info.json()
+                            if isinstance(body, dict):
+                                managed.worker.node_types = sorted(
+                                    str(node_type) for node_type in body.keys()
+                                )
+                    if managed.worker.state is WorkerState.STARTING:
                         managed.worker.state = WorkerState.IDLE
-                except httpx.HTTPError:
+                except (httpx.HTTPError, ValueError):
                     pass
