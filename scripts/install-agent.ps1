@@ -4,6 +4,8 @@ param(
 
     [string]$AgentToken,
 
+    [string]$UserToken,
+
     [string]$ComfyHome,
 
     [string]$ComfyCliExecutable,
@@ -59,6 +61,13 @@ if ($AgentToken) {
     $config += "COMFYCLUSTER_AGENT_TOKEN=$(ConvertTo-DotEnvValue $AgentToken)"
 } else {
     $line = Find-ExistingSetting $existing "COMFYCLUSTER_AGENT_TOKEN"
+    if ($line) { $config += $line }
+}
+
+if ($UserToken) {
+    $config += "COMFYCLUSTER_USER_TOKEN=$(ConvertTo-DotEnvValue $UserToken)"
+} else {
+    $line = Find-ExistingSetting $existing "COMFYCLUSTER_USER_TOKEN"
     if ($line) { $config += $line }
 }
 
@@ -123,6 +132,9 @@ Write-Host "Installed and started '$taskName'."
 Write-Host "Agent: $targetExe"
 Write-Host "Config: $configPath"
 Write-Host "Controller: $ControllerUrl"
+if ($UserToken) {
+    Write-Host "Desktop user identity: configured"
+}
 if (Test-Path $targetDesktop) {
     Write-Host "Desktop: $targetDesktop"
     if ($LaunchDesktop) {

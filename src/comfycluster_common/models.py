@@ -31,6 +31,11 @@ class JobState(StrEnum):
     CANCELED = "canceled"
 
 
+class JobVisibility(StrEnum):
+    PRIVATE = "private"
+    GROUP = "group"
+
+
 class GPUInfo(BaseModel):
     index: int
     uuid: str
@@ -149,6 +154,8 @@ class HostView(BaseModel):
 
 class JobSubmitRequest(BaseModel):
     workflow: dict[str, Any]
+    group_id: str | None = None
+    visibility: JobVisibility = JobVisibility.GROUP
     client_id: str | None = None
     preferred_worker_id: str | None = None
     minimum_vram_mb: int | None = None
@@ -160,9 +167,43 @@ class JobRecord(BaseModel):
     state: JobState = JobState.QUEUED
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    owner_user_id: str | None = None
+    group_id: str | None = None
+    visibility: JobVisibility = JobVisibility.GROUP
     assigned_host_id: str | None = None
     assigned_worker_id: str | None = None
     comfy_prompt_id: str | None = None
     error: str | None = None
     outputs: dict[str, Any] = Field(default_factory=dict)
     request: JobSubmitRequest
+
+
+class JobSummary(BaseModel):
+    job_id: UUID
+    state: JobState
+    created_at: datetime
+    updated_at: datetime
+    owner_user_id: str | None = None
+    group_id: str | None = None
+    visibility: JobVisibility = JobVisibility.GROUP
+    assigned_host_id: str | None = None
+    assigned_worker_id: str | None = None
+    error: str | None = None
+    output_count: int = 0
+
+    @classmethod
+    def from_job(cls, job: JobRecord) -> "JobSummary":
+        output_count = len(job.outputs) if isinstance(job.outputs, dict) else 0
+        return cls(
+            job_id=job.job_id,
+            state=job.state,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            owner_user_id=job.owner_user_id,
+            group_id=job.group_id,
+            visibility=job.visibility,
+            assigned_host_id=job.assigned_host_id,
+            assigned_worker_id=job.assigned_worker_id,
+            error=job.error,
+            output_count=output_count,
+        )

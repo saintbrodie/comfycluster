@@ -10,6 +10,7 @@ class ControllerSettings(BaseSettings):
 
     database_path: Path | None = None
     agent_token: str | None = None
+    admin_token: str | None = None
 
 
 def create_configured_store():

@@ -10,6 +10,7 @@ class DesktopSettings(BaseSettings):
 
     controller_url: str = "ws://127.0.0.1:9320/api/v1/agents/ws"
     local_api_url: str = "http://127.0.0.1:9321"
+    user_token: str | None = None
     desktop_refresh_seconds: float = 3.0
 
     @property

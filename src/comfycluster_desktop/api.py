@@ -25,13 +25,25 @@ class DesktopApi:
         self.local_base = settings.local_api_url.rstrip("/")
 
     @staticmethod
-    def _request(method: str, url: str, *, payload: dict | None = None, timeout: float = 3.0):
+    def _request(
+        method: str,
+        url: str,
+        *,
+        payload: dict | None = None,
+        timeout: float = 3.0,
+        headers: dict[str, str] | None = None,
+    ):
         with httpx.Client(timeout=timeout) as client:
-            response = client.request(method, url, json=payload)
+            response = client.request(method, url, json=payload, headers=headers)
             response.raise_for_status()
             if not response.content:
                 return None
             return response.json()
+
+    def _controller_headers(self) -> dict[str, str] | None:
+        if not self.settings.user_token:
+            return None
+        return {"Authorization": f"Bearer {self.settings.user_token}"}
 
     def local_status(self) -> dict:
         return self._request("GET", f"{self.local_base}/api/v1/status")
@@ -49,7 +61,9 @@ class DesktopApi:
 
     def host_mode(self, host_id: str, operation: str):
         return self._request(
-            "POST", f"{self.controller_base}/api/v1/hosts/{host_id}/{operation}"
+            "POST",
+            f"{self.controller_base}/api/v1/hosts/{host_id}/{operation}",
+            headers=self._controller_headers(),
         )
 
     def controller_worker_action(self, host_id: str, worker_id: str, operation: str):
@@ -57,10 +71,15 @@ class DesktopApi:
             "POST",
             f"{self.controller_base}/api/v1/hosts/{host_id}/commands/worker.{operation}",
             payload={"worker_id": worker_id},
+            headers=self._controller_headers(),
         )
 
     def _controller_get(self, path: str):
-        return self._request("GET", f"{self.controller_base}{path}")
+        return self._request(
+            "GET",
+            f"{self.controller_base}{path}",
+            headers=self._controller_headers(),
+        )
 
     def _controller_optional(self, path: str):
         try:
@@ -73,10 +92,12 @@ class DesktopApi:
     def snapshot(self) -> dict:
         snapshot = {
             "local": None,
+            "me": None,
             "hosts": [],
             "models": [],
             "nodes": [],
             "jobs": [],
+            "queue_summary": None,
             "desired_release": None,
             "release_plan": None,
             "local_error": None,
@@ -91,10 +112,12 @@ class DesktopApi:
             snapshot["local_error"] = str(exc)
 
         try:
+            snapshot["me"] = self._controller_get("/api/v1/me")
             snapshot["hosts"] = self._controller_get("/api/v1/hosts")
             snapshot["models"] = self._controller_get("/api/v1/models")
             snapshot["nodes"] = self._controller_get("/api/v1/nodes")
             snapshot["jobs"] = self._controller_get("/api/v1/jobs")
+            snapshot["queue_summary"] = self._controller_get("/api/v1/queue/summary")
             snapshot["desired_release"] = self._controller_optional("/api/v1/releases/desired")
             snapshot["release_plan"] = self._controller_optional("/api/v1/releases/plan")
         except (httpx.HTTPError, ValueError) as exc:

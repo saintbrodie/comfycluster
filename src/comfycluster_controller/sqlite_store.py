@@ -6,6 +6,12 @@ from uuid import UUID
 
 from comfycluster_common.models import HostView, JobRecord, JobState, WorkerState
 from comfycluster_common.releases import ReleaseManifest
+from comfycluster_common.tenancy import (
+    ApiTokenRecord,
+    GroupRecord,
+    MembershipRecord,
+    UserRecord,
+)
 
 from .store import FleetStore
 
@@ -35,10 +41,28 @@ class SQLiteFleetStore(FleetStore):
                 job_id TEXT PRIMARY KEY,
                 data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS groups (
+                group_id TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS memberships (
+                user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                data TEXT NOT NULL,
+                PRIMARY KEY(user_id, group_id)
+            );
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                token_hash TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
             """
         )
         self._db.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '2')"
         )
         self._db.commit()
         self._load()
@@ -63,28 +87,47 @@ class SQLiteFleetStore(FleetStore):
         for job in dirty_jobs:
             self._persist_job(job)
 
+        for (raw,) in self._db.execute("SELECT data FROM groups"):
+            group = GroupRecord.model_validate_json(raw)
+            self._groups[group.group_id] = group
+        for (raw,) in self._db.execute("SELECT data FROM users"):
+            user = UserRecord.model_validate_json(raw)
+            self._users[user.user_id] = user
+        for (raw,) in self._db.execute("SELECT data FROM memberships"):
+            membership = MembershipRecord.model_validate_json(raw)
+            self._memberships[(membership.user_id, membership.group_id)] = membership
+        for (raw,) in self._db.execute("SELECT data FROM api_tokens"):
+            token = ApiTokenRecord.model_validate_json(raw)
+            self._tokens[token.token_hash] = token
+
         row = self._db.execute("SELECT value FROM meta WHERE key='desired_release'").fetchone()
         if row:
             self._desired_release = ReleaseManifest.model_validate_json(row[0])
 
-    def _persist_host(self, host: HostView) -> None:
+    def _upsert(self, table: str, key_name: str, key: str, raw: str) -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO hosts(host_id, data) VALUES(?, ?)",
-            (host.host_id, host.model_dump_json()),
+            f"INSERT OR REPLACE INTO {table}({key_name}, data) VALUES(?, ?)",
+            (key, raw),
         )
         self._db.commit()
 
+    def _persist_host(self, host: HostView) -> None:
+        self._upsert("hosts", "host_id", host.host_id, host.model_dump_json())
+
     def _persist_job(self, job: JobRecord) -> None:
-        self._db.execute(
-            "INSERT OR REPLACE INTO jobs(job_id, data) VALUES(?, ?)",
-            (str(job.job_id), job.model_dump_json()),
-        )
-        self._db.commit()
+        self._upsert("jobs", "job_id", str(job.job_id), job.model_dump_json())
 
     def _persist_desired_release(self, manifest: ReleaseManifest) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('desired_release', ?)",
             (manifest.model_dump_json(),),
+        )
+        self._db.commit()
+
+    def _persist_membership(self, membership: MembershipRecord) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO memberships(user_id, group_id, data) VALUES(?, ?, ?)",
+            (membership.user_id, membership.group_id, membership.model_dump_json()),
         )
         self._db.commit()
 
@@ -135,11 +178,44 @@ class SQLiteFleetStore(FleetStore):
         self._persist_job(created)
         return created
 
+    async def create_job_enforcing_quotas(self, job: JobRecord) -> JobRecord:
+        created = await super().create_job_enforcing_quotas(job)
+        self._persist_job(created)
+        return created
+
     async def update_job(self, job_id: UUID, **changes: object):
         job = await super().update_job(job_id, **changes)
         if job:
             self._persist_job(job)
         return job
+
+    async def create_group(self, group: GroupRecord) -> GroupRecord:
+        stored = await super().create_group(group)
+        self._upsert("groups", "group_id", stored.group_id, stored.model_dump_json())
+        return stored
+
+    async def create_user(self, user: UserRecord) -> UserRecord:
+        stored = await super().create_user(user)
+        self._upsert("users", "user_id", stored.user_id, stored.model_dump_json())
+        return stored
+
+    async def add_membership(self, membership: MembershipRecord) -> MembershipRecord:
+        stored = await super().add_membership(membership)
+        self._persist_membership(stored)
+        return stored
+
+    async def issue_token(self, user_id: str, label: str | None = None):
+        issued = await super().issue_token(user_id, label)
+        record = next(item for item in self._tokens.values() if item.token_id == issued.token_id)
+        self._upsert("api_tokens", "token_hash", record.token_hash, record.model_dump_json())
+        return issued
+
+    async def revoke_token(self, token_id: UUID) -> bool:
+        revoked = await super().revoke_token(token_id)
+        if revoked:
+            record = next(item for item in self._tokens.values() if item.token_id == token_id)
+            self._upsert("api_tokens", "token_hash", record.token_hash, record.model_dump_json())
+        return revoked
 
     async def set_desired_release(self, manifest: ReleaseManifest) -> ReleaseManifest:
         stored = await super().set_desired_release(manifest)

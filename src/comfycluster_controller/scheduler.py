@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from comfycluster_common.models import HostView, JobSubmitRequest, WorkerSnapshot, WorkerState
+from comfycluster_common.models import (
+    HostView,
+    JobRecord,
+    JobSubmitRequest,
+    WorkerSnapshot,
+    WorkerState,
+)
+from comfycluster_common.tenancy import GroupRecord
 
 from .workflow import analyze_workflow, host_has_model
 
@@ -42,7 +49,10 @@ class WorkerAssessment:
 
 
 class Scheduler:
-    """Compatibility-first scheduler with transparent rejection diagnostics."""
+    """Compatibility-first scheduler with weighted fair sharing between groups."""
+
+    def __init__(self) -> None:
+        self._group_virtual_runtime: dict[str, float] = {}
 
     def evaluate(
         self,
@@ -124,3 +134,34 @@ class Scheduler:
             worker=selected.worker,
             free_vram_mb=selected.free_vram_mb or 0,
         )
+
+    def fair_group_order(
+        self,
+        jobs: list[JobRecord],
+        groups: list[GroupRecord],
+    ) -> list[str | None]:
+        """Return queued groups in weighted-fair order.
+
+        The score only advances after a successful dispatch. A weight of 2 therefore
+        accrues half as much virtual runtime as a weight of 1 and receives roughly
+        twice the dispatch opportunities when both groups remain backlogged.
+        """
+        group_map = {group.group_id: group for group in groups}
+        present: list[str | None] = []
+        for job in sorted(jobs, key=lambda item: item.created_at):
+            if job.group_id not in present:
+                present.append(job.group_id)
+
+        def score(group_id: str | None) -> tuple[float, str]:
+            return (
+                self._group_virtual_runtime.get(group_id or "__legacy__", 0.0),
+                group_id or "",
+            )
+
+        return sorted(present, key=score)
+
+    def note_dispatch(self, group_id: str | None, groups: list[GroupRecord]) -> None:
+        key = group_id or "__legacy__"
+        group = next((item for item in groups if item.group_id == group_id), None)
+        weight = group.policy.weight if group else 1.0
+        self._group_virtual_runtime[key] = self._group_virtual_runtime.get(key, 0.0) + (1.0 / weight)

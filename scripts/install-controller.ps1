@@ -2,6 +2,7 @@ param(
     [string]$ListenHost = "0.0.0.0",
     [int]$Port = 9320,
     [string]$AgentToken,
+    [string]$AdminToken,
     [string]$SslCertFile,
     [string]$SslKeyFile,
     [switch]$OpenFirewall,
@@ -22,6 +23,10 @@ function ConvertTo-DotEnvValue([string]$Value) {
     return "'" + ($Value -replace "'", "\\'") + "'"
 }
 
+function Find-ExistingSetting([string[]]$Lines, [string]$Name) {
+    return $Lines | Where-Object { $_ -match "^$([regex]::Escape($Name))=" } | Select-Object -First 1
+}
+
 $installDir = Join-Path $env:LOCALAPPDATA "ComfyCluster\Controller"
 $targetExe = Join-Path $installDir "comfycluster-controller.exe"
 $configPath = Join-Path $installDir ".env"
@@ -29,26 +34,34 @@ $databasePath = Join-Path $installDir "comfycluster.db"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item -Force $ControllerExe $targetExe
 
-$existingTokenLine = $null
+$existing = @()
 if (Test-Path $configPath) {
-    $existingTokenLine = Get-Content $configPath |
-        Where-Object { $_ -match '^COMFYCLUSTER_AGENT_TOKEN=' } |
-        Select-Object -First 1
+    $existing = @(Get-Content $configPath)
 }
 
-$generatedToken = $null
-if ($AgentToken) {
-    $tokenLine = "COMFYCLUSTER_AGENT_TOKEN=$(ConvertTo-DotEnvValue $AgentToken)"
-} elseif ($existingTokenLine) {
-    $tokenLine = $existingTokenLine
-} else {
-    $generatedToken = (& $targetExe new-agent-token).Trim()
-    $tokenLine = "COMFYCLUSTER_AGENT_TOKEN=$(ConvertTo-DotEnvValue $generatedToken)"
+function Resolve-TokenLine([string]$Name, [string]$Supplied) {
+    if ($Supplied) {
+        return @("$Name=$(ConvertTo-DotEnvValue $Supplied)", $null)
+    }
+    $existingLine = Find-ExistingSetting $existing $Name
+    if ($existingLine) {
+        return @($existingLine, $null)
+    }
+    $generated = (& $targetExe new-agent-token).Trim()
+    return @("$Name=$(ConvertTo-DotEnvValue $generated)", $generated)
 }
+
+$agentResolved = Resolve-TokenLine "COMFYCLUSTER_AGENT_TOKEN" $AgentToken
+$adminResolved = Resolve-TokenLine "COMFYCLUSTER_ADMIN_TOKEN" $AdminToken
+$agentTokenLine = $agentResolved[0]
+$generatedAgentToken = $agentResolved[1]
+$adminTokenLine = $adminResolved[0]
+$generatedAdminToken = $adminResolved[1]
 
 @(
     "COMFYCLUSTER_DATABASE_PATH=$(ConvertTo-DotEnvValue $databasePath)"
-    $tokenLine
+    $agentTokenLine
+    $adminTokenLine
 ) | Set-Content -Encoding UTF8 $configPath
 
 $arguments = @("serve", "--host", $ListenHost, "--port", [string]$Port)
@@ -97,11 +110,19 @@ $wsScheme = if ($SslCertFile) { "wss" } else { "ws" }
 Write-Host "Installed and started '$taskName'."
 Write-Host "Dashboard: ${scheme}://localhost:$Port"
 Write-Host "Agent URL: ${wsScheme}://<controller-host>:$Port/api/v1/agents/ws"
-if ($generatedToken) {
-    Write-Host "Agent bootstrap token: $generatedToken"
+if ($generatedAgentToken) {
+    Write-Host "Agent bootstrap token: $generatedAgentToken"
 } elseif ($AgentToken) {
     Write-Host "Agent bootstrap token: using supplied token"
 } else {
     Write-Host "Agent bootstrap token: preserved from existing config"
+}
+if ($generatedAdminToken) {
+    Write-Host "Platform admin token: $generatedAdminToken"
+    Write-Host "Store this separately from the agent token. It is for human/API administration."
+} elseif ($AdminToken) {
+    Write-Host "Platform admin token: using supplied token"
+} else {
+    Write-Host "Platform admin token: preserved from existing config"
 }
 Write-Host "Controller config: $configPath"
