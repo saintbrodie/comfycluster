@@ -20,6 +20,7 @@ from comfycluster_common.protocol import parse_agent_message
 
 from .connections import AgentConnectionManager
 from .scheduler import Scheduler
+from .settings import create_configured_store
 from .store import FleetStore
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -216,6 +217,11 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
                                 current_job_id=None,
                             )
                         await dispatch_queued_jobs()
+                    elif message.event == "job.cancel_failed" and message.job_id:
+                        await app.state.store.update_job(
+                            message.job_id,
+                            error=message.payload.get("error", "worker failed to cancel job"),
+                        )
                     elif message.event == "job.failed" and message.job_id:
                         failed = await app.state.store.set_job_state(
                             message.job_id,
@@ -240,4 +246,4 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
     return app
 
 
-app = create_app()
+app = create_app(create_configured_store())

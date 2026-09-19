@@ -129,14 +129,21 @@ class AgentClient:
                     payload=payload,
                 )
         except Exception as exc:
+            is_job_action = command.action in {"job.submit", "job.cancel"}
             job_id = (
                 UUID(command.payload["job_id"])
-                if command.action == "job.submit" and command.payload.get("job_id")
+                if is_job_action and command.payload.get("job_id")
                 else None
             )
+            if command.action == "job.submit" and job_id:
+                event_name = "job.failed"
+            elif command.action == "job.cancel" and job_id:
+                event_name = "job.cancel_failed"
+            else:
+                event_name = "command.failed"
             event = AgentEvent(
                 host_id=self.host_id,
-                event="job.failed" if job_id else "command.failed",
+                event=event_name,
                 command_id=command.command_id,
                 job_id=job_id,
                 payload={"error": str(exc)},

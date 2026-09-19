@@ -45,11 +45,10 @@ Implemented:
 - native process launch with `--cuda-device` and unique ports
 - fleet and individual worker start/stop/restart commands
 - heartbeat inventory and disconnect handling
-- custom-node and model inventory on registration/refresh
 - basic global scheduler that selects an idle worker with the most free VRAM
 - controller-to-agent `job.submit`, with local `/prompt` submission
-- terminal job polling so completed/failed jobs release the worker
 - typed Pydantic protocol models
+- optional SQLite durability for fleet/job state
 - tests and Windows CI
 
 ## Quick development demo
@@ -64,7 +63,7 @@ Python 3.11+ is currently required for the development build.
 Or run the pieces separately:
 
 ```powershell
-.\.venv\Scripts\comfycluster-controller.exe serve
+.\.venv\Scripts\comfycluster-controller.exe serve --database .\comfycluster.db
 ```
 
 Then in another terminal:
@@ -89,10 +88,10 @@ The long-term installer will remove the Python/manual setup requirement and inst
 - `GET /api/v1/health`
 - `GET /api/v1/hosts`
 - `GET /api/v1/workers`
-- `GET /api/v1/hosts/{host}/inventory`
 - `POST /api/v1/hosts/{host}/commands/{action}`
 - `GET /api/v1/jobs`
 - `POST /api/v1/jobs`
+- `POST /api/v1/jobs/{job}/cancel`
 - `WS /api/v1/agents/ws`
 
 A submitted job takes an API-format Comfy workflow. The first scheduler only considers connectivity, worker state, optional preferred worker, optional minimum VRAM, and free VRAM. Model/node compatibility comes later.
