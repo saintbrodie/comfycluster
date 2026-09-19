@@ -1,11 +1,13 @@
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path .venv)) {
-    py -3 -m venv .venv
+    # Respect the interpreter selected by the caller (for example actions/setup-python)
+    # instead of asking the Windows py launcher to choose a different Python version.
+    python -m venv .venv
 }
 
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
-& .\.venv\Scripts\pip.exe install -e ".[packaging]"
+& .\.venv\Scripts\python.exe -m pip install -e ".[packaging]"
 & .\.venv\Scripts\python.exe -m PyInstaller `
     --noconfirm `
     --clean `
