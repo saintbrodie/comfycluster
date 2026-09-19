@@ -30,6 +30,7 @@ from .settings import DesktopSettings
 
 APP_STYLE = """
 QMainWindow, QWidget { background: #101114; color: #eceff3; }
+QLabel { background: transparent; }
 QFrame#sidebar { background: #14161a; border-right: 1px solid #292d33; }
 QFrame#card { background: #191c21; border: 1px solid #2c3138; border-radius: 12px; }
 QLabel#muted { color: #9299a3; }
@@ -53,33 +54,30 @@ QScrollArea { border: 0; }
 def clear_layout(layout) -> None:
     while layout.count():
         item = layout.takeAt(0)
-        widget = item.widget()
-        child = item.layout()
-        if widget:
-            widget.deleteLater()
-        elif child:
-            clear_layout(child)
+        if item.widget():
+            item.widget().deleteLater()
+        elif item.layout():
+            clear_layout(item.layout())
 
 
 def fmt_size(size: int | None) -> str:
     value = float(size or 0)
-    units = ["B", "KB", "MB", "GB", "TB"]
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} TB"
+    return "0 B"
 
 
 def badge(text: str, tone: str = "neutral") -> QLabel:
-    colors = {
+    palette = {
         "good": ("#173b2d", "#83e6b6"),
         "warn": ("#493914", "#ffd46e"),
         "bad": ("#481f24", "#ff9ca7"),
         "accent": ("#3d2b1d", "#ffad6d"),
         "neutral": ("#292d33", "#c5cad1"),
     }
-    background, foreground = colors.get(tone, colors["neutral"])
+    background, foreground = palette.get(tone, palette["neutral"])
     label = QLabel(text)
     label.setStyleSheet(
         f"background:{background};color:{foreground};border-radius:9px;padding:3px 8px;font-size:11px;"
@@ -89,12 +87,12 @@ def badge(text: str, tone: str = "neutral") -> QLabel:
 
 
 class Card(QFrame):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self) -> None:
+        super().__init__()
         self.setObjectName("card")
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(16, 14, 16, 14)
-        self.layout.setSpacing(9)
+        self.body = QVBoxLayout(self)
+        self.body.setContentsMargins(16, 14, 16, 14)
+        self.body.setSpacing(9)
 
 
 class SnapshotPoller(QThread):
@@ -104,11 +102,11 @@ class SnapshotPoller(QThread):
         super().__init__()
         self.api = api
         self.interval = max(1.0, interval_seconds)
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._wake = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             self.snapshot_ready.emit(self.api.snapshot())
             self._wake.wait(self.interval)
             self._wake.clear()
@@ -117,7 +115,7 @@ class SnapshotPoller(QThread):
         self._wake.set()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self._wake.set()
 
 
@@ -132,407 +130,8 @@ class ActionRunner(QThread):
     def run(self) -> None:
         try:
             self.succeeded.emit(self.action())
-        except Exception as exc:  # GUI boundary: surface action failures to the operator.
+        except Exception as exc:
             self.failed.emit(str(exc))
-
-
-class Page(QWidget):
-    def __init__(self, shell: "MainWindow", title: str, subtitle: str) -> None:
-        super().__init__()
-        self.shell = shell
-        self.root = QVBoxLayout(self)
-        self.root.setContentsMargins(26, 24, 26, 24)
-        self.root.setSpacing(14)
-        title_label = QLabel(title)
-        title_label.setObjectName("title")
-        self.root.addWidget(title_label)
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("muted")
-        subtitle_label.setWordWrap(True)
-        self.root.addWidget(subtitle_label)
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        raise NotImplementedError
-
-
-class HomePage(Page):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Home", "This workstation and its ComfyUI workers.")
-        self.metrics = QHBoxLayout()
-        self.root.addLayout(self.metrics)
-        self.environment = Card()
-        self.root.addWidget(self.environment)
-        section = QLabel("GPU Workers")
-        section.setObjectName("sectionTitle")
-        self.root.addWidget(section)
-        self.worker_scroll = QScrollArea()
-        self.worker_scroll.setWidgetResizable(True)
-        self.worker_body = QWidget()
-        self.worker_layout = QVBoxLayout(self.worker_body)
-        self.worker_layout.setContentsMargins(0, 0, 0, 0)
-        self.worker_layout.setSpacing(10)
-        self.worker_scroll.setWidget(self.worker_body)
-        self.root.addWidget(self.worker_scroll, 1)
-
-    def _metric(self, label: str, value: str) -> Card:
-        card = Card()
-        caption = QLabel(label)
-        caption.setObjectName("muted")
-        number = QLabel(value)
-        number.setObjectName("metricValue")
-        card.layout.addWidget(caption)
-        card.layout.addWidget(number)
-        return card
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        clear_layout(self.metrics)
-        local = snapshot.get("local") or {}
-        registration = local.get("registration") or {}
-        gpus = registration.get("gpus") or []
-        workers = registration.get("workers") or []
-        total_vram = sum(int(gpu.get("memory_total_mb") or 0) for gpu in gpus)
-        running = sum(1 for worker in workers if worker.get("state") not in {"stopped", "offline"})
-        controller_connected = bool(local.get("controller_connected"))
-        self.metrics.addWidget(self._metric("GPUs", str(len(gpus))))
-        self.metrics.addWidget(self._metric("VRAM", f"{total_vram / 1024:.0f} GB" if total_vram else "0 GB"))
-        self.metrics.addWidget(self._metric("Workers", f"{running} / {len(workers)}"))
-        self.metrics.addWidget(self._metric("Cluster", "Connected" if controller_connected else "Offline"))
-
-        clear_layout(self.environment.layout)
-        top = QHBoxLayout()
-        comfy = registration.get("comfy") or {}
-        name_box = QVBoxLayout()
-        env_title = QLabel("Production Comfy")
-        env_title.setObjectName("sectionTitle")
-        name_box.addWidget(env_title)
-        path = comfy.get("path") or "ComfyUI installation not detected"
-        path_label = QLabel(path)
-        path_label.setObjectName("muted")
-        path_label.setWordWrap(True)
-        name_box.addWidget(path_label)
-        top.addLayout(name_box, 1)
-        host = snapshot.get("local_host") or {}
-        if not local:
-            top.addWidget(badge("Agent unavailable", "bad"))
-        elif host.get("draining"):
-            top.addWidget(badge("Draining", "warn"))
-        elif controller_connected:
-            top.addWidget(badge("Cluster ready", "good"))
-        else:
-            top.addWidget(badge("Local only", "warn"))
-        self.environment.layout.addLayout(top)
-
-        detail = QLabel(
-            f"Comfy {comfy.get('version') or 'unversioned'}  |  "
-            f"{len(registration.get('nodes') or [])} node packages  |  "
-            f"{len(registration.get('models') or [])} model files"
-        )
-        detail.setObjectName("muted")
-        self.environment.layout.addWidget(detail)
-        buttons = QHBoxLayout()
-        open_button = QPushButton("Open ComfyUI")
-        open_button.setObjectName("primary")
-        open_button.clicked.connect(shell.open_local_comfy)
-        buttons.addWidget(open_button)
-        for label, operation in (("Start All", "start"), ("Stop All", "stop")):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _=False, op=operation: shell.local_fleet_action(op))
-            buttons.addWidget(button)
-        restart = QPushButton("Restart All")
-        restart.clicked.connect(shell.restart_all_workers)
-        buttons.addWidget(restart)
-        if host:
-            drain = QPushButton("Resume Host" if host.get("draining") else "Drain Host")
-            drain.clicked.connect(
-                lambda: shell.host_mode("resume" if host.get("draining") else "drain")
-            )
-            buttons.addWidget(drain)
-        buttons.addStretch(1)
-        self.environment.layout.addLayout(buttons)
-
-        clear_layout(self.worker_layout)
-        if not workers:
-            empty = QLabel("No local GPU workers discovered yet.")
-            empty.setObjectName("muted")
-            self.worker_layout.addWidget(empty)
-        for worker in workers:
-            gpu = next((item for item in gpus if item.get("uuid") == worker.get("gpu_uuid")), {})
-            card = Card()
-            row = QHBoxLayout()
-            info = QVBoxLayout()
-            title = QLabel(gpu.get("name") or worker.get("worker_id") or "GPU Worker")
-            title.setObjectName("sectionTitle")
-            info.addWidget(title)
-            info.addWidget(
-                QLabel(
-                    f"GPU {worker.get('gpu_index')}  |  port {worker.get('port')}  |  "
-                    f"VRAM {gpu.get('memory_used_mb', 0)} / {gpu.get('memory_total_mb', 0)} MB  |  "
-                    f"utilization {gpu.get('utilization_percent', 0)}%"
-                )
-            )
-            info.itemAt(1).widget().setObjectName("muted")
-            row.addLayout(info, 1)
-            state = str(worker.get("state") or "unknown")
-            row.addWidget(
-                badge(
-                    state.upper(),
-                    "good" if state == "idle" else "warn" if state in {"busy", "starting"} else "bad",
-                )
-            )
-            for label, operation in (("Start", "start"), ("Restart", "restart"), ("Stop", "stop")):
-                button = QPushButton(label)
-                worker_id = str(worker.get("worker_id"))
-                button.clicked.connect(
-                    lambda _=False, wid=worker_id, op=operation: shell.local_worker_action(wid, op)
-                )
-                row.addWidget(button)
-            card.layout.addLayout(row)
-            self.worker_layout.addWidget(card)
-        self.worker_layout.addStretch(1)
-
-
-class EnvironmentPage(Page):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Comfy Environments", "Managed ComfyUI runtimes on this workstation.")
-        self.card = Card()
-        self.root.addWidget(self.card)
-        self.root.addStretch(1)
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        clear_layout(self.card.layout)
-        local = snapshot.get("local") or {}
-        registration = local.get("registration") or {}
-        comfy = registration.get("comfy") or {}
-        desired = snapshot.get("desired_release") or {}
-        plan = snapshot.get("release_plan") or {}
-        host_id = snapshot.get("host_id")
-        host_plan = next((item for item in plan.get("hosts", []) if item.get("host_id") == host_id), {})
-
-        top = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title = QLabel("Production")
-        title.setObjectName("sectionTitle")
-        title_box.addWidget(title)
-        subtitle = QLabel(comfy.get("path") or "No ComfyUI installation detected")
-        subtitle.setObjectName("muted")
-        subtitle.setWordWrap(True)
-        title_box.addWidget(subtitle)
-        top.addLayout(title_box, 1)
-        if host_plan:
-            top.addWidget(badge("IN SYNC" if host_plan.get("in_sync") else "DRIFT", "good" if host_plan.get("in_sync") else "warn"))
-        self.card.layout.addLayout(top)
-
-        rows = [
-            ("Comfy version", comfy.get("version") or "Unknown"),
-            ("Git commit", comfy.get("git_commit") or "Unknown"),
-            ("Python", comfy.get("python_executable") or "Unknown"),
-            ("Fleet release", desired.get("name") or "Not configured"),
-            ("Custom nodes", str(len(registration.get("nodes") or []))),
-            ("Models", str(len(registration.get("models") or []))),
-        ]
-        for key, value in rows:
-            row = QHBoxLayout()
-            key_label = QLabel(key)
-            key_label.setObjectName("muted")
-            row.addWidget(key_label)
-            row.addStretch(1)
-            row.addWidget(QLabel(value))
-            self.card.layout.addLayout(row)
-
-        if host_plan.get("drift"):
-            drift = QLabel(
-                "Drift: " + ", ".join(item.get("kind", "unknown") for item in host_plan["drift"])
-            )
-            drift.setStyleSheet("color:#ffd46e;")
-            drift.setWordWrap(True)
-            self.card.layout.addWidget(drift)
-
-        buttons = QHBoxLayout()
-        open_button = QPushButton("Open ComfyUI")
-        open_button.setObjectName("primary")
-        open_button.clicked.connect(shell.open_local_comfy)
-        buttons.addWidget(open_button)
-        refresh = QPushButton("Refresh Inventory")
-        refresh.clicked.connect(shell.refresh_inventory)
-        buttons.addWidget(refresh)
-        buttons.addStretch(1)
-        self.card.layout.addLayout(buttons)
-
-
-class TablePage(Page):
-    def __init__(self, shell: "MainWindow", title: str, subtitle: str, columns: list[str]) -> None:
-        super().__init__(shell, title, subtitle)
-        self.table = QTableWidget(0, len(columns))
-        self.table.setHorizontalHeaderLabels(columns)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.root.addWidget(self.table, 1)
-
-    def set_rows(self, rows: list[list[str]]) -> None:
-        self.table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column_index, value in enumerate(row):
-                self.table.setItem(row_index, column_index, QTableWidgetItem(value))
-
-
-class ModelsPage(TablePage):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Models", "Cluster model inventory and availability.", ["Model", "Type", "Size", "This PC", "Cluster"])
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        local = snapshot.get("local") or {}
-        registration = local.get("registration") or {}
-        local_keys = {
-            (str(item.get("category", "")).casefold(), str(item.get("name", "")).casefold())
-            for item in registration.get("models") or []
-        }
-        host_count = max(1, len(snapshot.get("hosts") or []))
-        rows = []
-        for item in snapshot.get("models") or []:
-            key = (str(item.get("category", "")).casefold(), str(item.get("name", "")).casefold())
-            rows.append(
-                [
-                    str(item.get("name") or ""),
-                    str(item.get("category") or ""),
-                    fmt_size(item.get("size_bytes")),
-                    "Yes" if key in local_keys else "No",
-                    f"{item.get('host_count', 0)} / {host_count}",
-                ]
-            )
-        self.set_rows(rows)
-
-
-class NodesPage(TablePage):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Custom Nodes", "Custom-node packages visible across the fleet.", ["Node", "This PC Commit", "Hosts", "Status"])
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        host_id = snapshot.get("host_id")
-        host_count = max(1, len(snapshot.get("hosts") or []))
-        rows = []
-        for item in snapshot.get("nodes") or []:
-            hosts = item.get("hosts") or {}
-            local = hosts.get(host_id) or {}
-            commits = {str(value.get("git_commit")) for value in hosts.values() if value.get("git_commit")}
-            status = "Consistent" if len(commits) <= 1 and len(hosts) == host_count else "Check fleet"
-            rows.append(
-                [
-                    str(item.get("name") or ""),
-                    str(local.get("git_commit") or "Not installed"),
-                    f"{len(hosts)} / {host_count}",
-                    status,
-                ]
-            )
-        self.set_rows(rows)
-
-
-class OutputsPage(TablePage):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Outputs", "Recent ComfyCluster jobs and their generated outputs.", ["State", "Created", "Host", "Worker", "Outputs", "Job"])
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        rows = []
-        for job in (snapshot.get("jobs") or [])[:100]:
-            outputs = job.get("outputs") or {}
-            output_count = sum(len(value) if isinstance(value, dict) else 1 for value in outputs.values())
-            rows.append(
-                [
-                    str(job.get("state") or ""),
-                    str(job.get("created_at") or "").replace("T", " ")[:19],
-                    str(job.get("assigned_host_id") or ""),
-                    str(job.get("assigned_worker_id") or ""),
-                    str(output_count),
-                    str(job.get("job_id") or "")[:12],
-                ]
-            )
-        self.set_rows(rows)
-
-
-class ClusterPage(Page):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Cluster", "All Windows hosts and GPU workers known to the controller.")
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.body = QWidget()
-        self.cards = QVBoxLayout(self.body)
-        self.cards.setContentsMargins(0, 0, 0, 0)
-        self.cards.setSpacing(10)
-        self.scroll.setWidget(self.body)
-        self.root.addWidget(self.scroll, 1)
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        clear_layout(self.cards)
-        hosts = snapshot.get("hosts") or []
-        if not hosts:
-            empty = QLabel("Controller has no registered hosts yet.")
-            empty.setObjectName("muted")
-            self.cards.addWidget(empty)
-        for host in hosts:
-            card = Card()
-            top = QHBoxLayout()
-            name_box = QVBoxLayout()
-            name = QLabel(str(host.get("hostname") or host.get("host_id") or "Host"))
-            name.setObjectName("sectionTitle")
-            name_box.addWidget(name)
-            name_box.addWidget(QLabel(f"{len(host.get('gpus') or [])} GPUs  |  {len(host.get('models') or [])} models  |  {len(host.get('nodes') or [])} nodes"))
-            name_box.itemAt(1).widget().setObjectName("muted")
-            top.addLayout(name_box, 1)
-            if host.get("draining"):
-                top.addWidget(badge("DRAINING", "warn"))
-            top.addWidget(badge("ONLINE" if host.get("connected") else "OFFLINE", "good" if host.get("connected") else "bad"))
-            mode = QPushButton("Resume" if host.get("draining") else "Drain")
-            host_id = str(host.get("host_id"))
-            operation = "resume" if host.get("draining") else "drain"
-            mode.clicked.connect(lambda _=False, hid=host_id, op=operation: shell.host_mode(op, hid))
-            top.addWidget(mode)
-            card.layout.addLayout(top)
-            for worker in host.get("workers") or []:
-                gpu = next((g for g in host.get("gpus") or [] if g.get("uuid") == worker.get("gpu_uuid")), {})
-                row = QHBoxLayout()
-                row.addWidget(QLabel(str(gpu.get("name") or worker.get("worker_id"))), 1)
-                row.addWidget(QLabel(f"GPU {worker.get('gpu_index')}  :{worker.get('port')}"))
-                row.addWidget(badge(str(worker.get("state") or "unknown").upper()))
-                card.layout.addLayout(row)
-            self.cards.addWidget(card)
-        self.cards.addStretch(1)
-
-
-class SettingsPage(Page):
-    def __init__(self, shell: "MainWindow") -> None:
-        super().__init__(shell, "Settings", "Desktop connection and local agent information.")
-        self.card = Card()
-        self.root.addWidget(self.card)
-        self.root.addStretch(1)
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        clear_layout(self.card.layout)
-        rows = [
-            ("Controller", snapshot.get("controller_base") or ""),
-            ("Local agent API", self.shell.settings.local_api_url),
-            ("Host ID", snapshot.get("host_id") or self.shell.settings.host_id),
-            ("Refresh interval", f"{self.shell.settings.desktop_refresh_seconds:.1f} seconds"),
-        ]
-        for key, value in rows:
-            row = QHBoxLayout()
-            key_label = QLabel(key)
-            key_label.setObjectName("muted")
-            row.addWidget(key_label)
-            row.addStretch(1)
-            value_label = QLabel(str(value))
-            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            row.addWidget(value_label)
-            self.card.layout.addLayout(row)
-        buttons = QHBoxLayout()
-        admin = QPushButton("Open Controller Admin")
-        admin.clicked.connect(self.shell.open_controller)
-        buttons.addWidget(admin)
-        refresh = QPushButton("Refresh Now")
-        refresh.clicked.connect(self.shell.refresh_now)
-        buttons.addWidget(refresh)
-        buttons.addStretch(1)
-        self.card.layout.addLayout(buttons)
 
 
 class MainWindow(QMainWindow):
@@ -540,7 +139,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self.api = DesktopApi(settings)
-        self.snapshot: dict = {}
+        self.snapshot: dict[str, Any] = {}
         self.runners: set[ActionRunner] = set()
         self.setWindowTitle("ComfyCluster")
         self.resize(1280, 820)
@@ -561,37 +160,36 @@ class MainWindow(QMainWindow):
         logo = QLabel("ComfyCluster")
         logo.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         side.addWidget(logo)
-        tagline = QLabel("ComfyUI fleet manager")
-        tagline.setObjectName("muted")
-        side.addWidget(tagline)
+        subtitle = QLabel("ComfyUI fleet manager")
+        subtitle.setObjectName("muted")
+        side.addWidget(subtitle)
         side.addSpacing(18)
 
         self.stack = QStackedWidget()
-        self.pages: list[Page] = [
-            HomePage(self),
-            EnvironmentPage(self),
-            ModelsPage(self),
-            NodesPage(self),
-            OutputsPage(self),
-            ClusterPage(self),
-            SettingsPage(self),
-        ]
+        self.home_layout = self._scroll_page("Home", "This workstation and its ComfyUI workers.")
+        self.comfy_layout = self._scroll_page("Comfy Environments", "Managed ComfyUI runtimes on this workstation.")
+        self.models_table = self._table_page("Models", "Cluster model inventory and availability.", ["Model", "Type", "Size", "This PC", "Cluster"])
+        self.nodes_table = self._table_page("Custom Nodes", "Custom-node packages visible across the fleet.", ["Node", "This PC Commit", "Hosts", "Status"])
+        self.outputs_table = self._table_page("Outputs", "Recent ComfyCluster jobs and their generated outputs.", ["State", "Created", "Host", "Worker", "Outputs", "Job"])
+        self.cluster_layout = self._scroll_page("Cluster", "All Windows hosts and GPU workers known to the controller.")
+        self.settings_layout = self._scroll_page("Settings", "Desktop connection and local agent information.")
+
         labels = ["Home", "Comfy", "Models", "Custom Nodes", "Outputs", "Cluster", "Settings"]
         self.nav_buttons: list[QPushButton] = []
-        for index, (label, page) in enumerate(zip(labels, self.pages, strict=True)):
+        for index, label in enumerate(labels):
             button = QPushButton(label)
             button.setObjectName("nav")
             button.setCheckable(True)
-            button.clicked.connect(lambda _=False, i=index: self.set_page(i))
-            self.nav_buttons.append(button)
+            button.clicked.connect(lambda _checked=False, i=index: self.set_page(i))
             side.addWidget(button)
-            self.stack.addWidget(page)
+            self.nav_buttons.append(button)
         side.addStretch(1)
         self.connection_badge = badge("Starting...", "neutral")
         side.addWidget(self.connection_badge)
-        version = QLabel("Windows desktop preview")
-        version.setObjectName("muted")
-        side.addWidget(version)
+        hint = QLabel("Windows desktop preview")
+        hint.setObjectName("muted")
+        side.addWidget(hint)
+
         root.addWidget(sidebar)
         root.addWidget(self.stack, 1)
         self.set_page(0)
@@ -599,6 +197,46 @@ class MainWindow(QMainWindow):
         self.poller = SnapshotPoller(self.api, settings.desktop_refresh_seconds)
         self.poller.snapshot_ready.connect(self.apply_snapshot)
         self.poller.start()
+
+    def _page_header(self, page: QWidget, title: str, subtitle: str) -> QVBoxLayout:
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(26, 24, 26, 24)
+        layout.setSpacing(14)
+        title_label = QLabel(title)
+        title_label.setObjectName("title")
+        layout.addWidget(title_label)
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("muted")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(subtitle_label)
+        return layout
+
+    def _scroll_page(self, title: str, subtitle: str) -> QVBoxLayout:
+        page = QWidget()
+        root = self._page_header(page, title, subtitle)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+        self.stack.addWidget(page)
+        return body_layout
+
+    def _table_page(self, title: str, subtitle: str, columns: list[str]) -> QTableWidget:
+        page = QWidget()
+        root = self._page_header(page, title, subtitle)
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.verticalHeader().setVisible(False)
+        root.addWidget(table, 1)
+        self.stack.addWidget(page)
+        return table
 
     def set_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -608,20 +246,323 @@ class MainWindow(QMainWindow):
     def apply_snapshot(self, snapshot: dict) -> None:
         self.snapshot = snapshot
         local = snapshot.get("local") or {}
-        controller_error = snapshot.get("controller_error")
-        local_error = snapshot.get("local_error")
-        if local and local.get("controller_connected") and not controller_error:
+        if local and local.get("controller_connected") and not snapshot.get("controller_error"):
             text, tone = "Cluster connected", "good"
-        elif local and not local_error:
+        elif local and not snapshot.get("local_error"):
             text, tone = "Local mode", "warn"
         else:
             text, tone = "Agent offline", "bad"
+        styled = badge(text, tone)
         self.connection_badge.setText(text)
-        replacement = badge(text, tone)
-        self.connection_badge.setStyleSheet(replacement.styleSheet())
-        replacement.deleteLater()
-        for page in self.pages:
-            page.update_snapshot(snapshot)
+        self.connection_badge.setStyleSheet(styled.styleSheet())
+        styled.deleteLater()
+        self._render_home()
+        self._render_comfy()
+        self._render_models()
+        self._render_nodes()
+        self._render_outputs()
+        self._render_cluster()
+        self._render_settings()
+
+    def _registration(self) -> dict:
+        return ((self.snapshot.get("local") or {}).get("registration") or {})
+
+    def _render_home(self) -> None:
+        clear_layout(self.home_layout)
+        registration = self._registration()
+        gpus = registration.get("gpus") or []
+        workers = registration.get("workers") or []
+        total_vram = sum(int(gpu.get("memory_total_mb") or 0) for gpu in gpus)
+        running = sum(1 for worker in workers if worker.get("state") not in {"stopped", "offline"})
+        connected = bool((self.snapshot.get("local") or {}).get("controller_connected"))
+
+        metrics = QHBoxLayout()
+        for label, value in (
+            ("GPUs", str(len(gpus))),
+            ("VRAM", f"{total_vram / 1024:.0f} GB" if total_vram else "0 GB"),
+            ("Workers", f"{running} / {len(workers)}"),
+            ("Cluster", "Connected" if connected else "Offline"),
+        ):
+            card = Card()
+            caption = QLabel(label)
+            caption.setObjectName("muted")
+            value_label = QLabel(value)
+            value_label.setObjectName("metricValue")
+            card.body.addWidget(caption)
+            card.body.addWidget(value_label)
+            metrics.addWidget(card)
+        self.home_layout.addLayout(metrics)
+
+        env = Card()
+        comfy = registration.get("comfy") or {}
+        top = QHBoxLayout()
+        name_box = QVBoxLayout()
+        title = QLabel("Production Comfy")
+        title.setObjectName("sectionTitle")
+        name_box.addWidget(title)
+        path = QLabel(comfy.get("path") or "ComfyUI installation not detected")
+        path.setObjectName("muted")
+        path.setWordWrap(True)
+        name_box.addWidget(path)
+        top.addLayout(name_box, 1)
+        host = self.snapshot.get("local_host") or {}
+        if not registration:
+            top.addWidget(badge("Agent unavailable", "bad"))
+        elif host.get("draining"):
+            top.addWidget(badge("Draining", "warn"))
+        elif connected:
+            top.addWidget(badge("Cluster ready", "good"))
+        else:
+            top.addWidget(badge("Local only", "warn"))
+        env.body.addLayout(top)
+        detail = QLabel(
+            f"Comfy {comfy.get('version') or 'unversioned'}  |  "
+            f"{len(registration.get('nodes') or [])} node packages  |  "
+            f"{len(registration.get('models') or [])} model files"
+        )
+        detail.setObjectName("muted")
+        env.body.addWidget(detail)
+        actions = QHBoxLayout()
+        open_button = QPushButton("Open ComfyUI")
+        open_button.setObjectName("primary")
+        open_button.clicked.connect(self.open_local_comfy)
+        actions.addWidget(open_button)
+        for label, operation in (("Start All", "start"), ("Stop All", "stop")):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, op=operation: self.local_fleet_action(op))
+            actions.addWidget(button)
+        restart = QPushButton("Restart All")
+        restart.clicked.connect(self.restart_all_workers)
+        actions.addWidget(restart)
+        if host:
+            operation = "resume" if host.get("draining") else "drain"
+            drain = QPushButton("Resume Host" if host.get("draining") else "Drain Host")
+            drain.clicked.connect(lambda _checked=False, op=operation: self.host_mode(op))
+            actions.addWidget(drain)
+        actions.addStretch(1)
+        env.body.addLayout(actions)
+        self.home_layout.addWidget(env)
+
+        workers_title = QLabel("GPU Workers")
+        workers_title.setObjectName("sectionTitle")
+        self.home_layout.addWidget(workers_title)
+        if not workers:
+            empty = QLabel("No local GPU workers discovered yet.")
+            empty.setObjectName("muted")
+            self.home_layout.addWidget(empty)
+        for worker in workers:
+            gpu = next((item for item in gpus if item.get("uuid") == worker.get("gpu_uuid")), {})
+            card = Card()
+            row = QHBoxLayout()
+            info = QVBoxLayout()
+            name = QLabel(gpu.get("name") or worker.get("worker_id") or "GPU Worker")
+            name.setObjectName("sectionTitle")
+            info.addWidget(name)
+            details = QLabel(
+                f"GPU {worker.get('gpu_index')}  |  port {worker.get('port')}  |  "
+                f"VRAM {gpu.get('memory_used_mb', 0)} / {gpu.get('memory_total_mb', 0)} MB  |  "
+                f"utilization {gpu.get('utilization_percent', 0)}%"
+            )
+            details.setObjectName("muted")
+            info.addWidget(details)
+            row.addLayout(info, 1)
+            state = str(worker.get("state") or "unknown")
+            tone = "good" if state == "idle" else "warn" if state in {"busy", "starting"} else "bad"
+            row.addWidget(badge(state.upper(), tone))
+            for label, operation in (("Start", "start"), ("Restart", "restart"), ("Stop", "stop")):
+                button = QPushButton(label)
+                worker_id = str(worker.get("worker_id"))
+                button.clicked.connect(
+                    lambda _checked=False, wid=worker_id, op=operation: self.local_worker_action(wid, op)
+                )
+                row.addWidget(button)
+            card.body.addLayout(row)
+            self.home_layout.addWidget(card)
+        self.home_layout.addStretch(1)
+
+    def _render_comfy(self) -> None:
+        clear_layout(self.comfy_layout)
+        registration = self._registration()
+        comfy = registration.get("comfy") or {}
+        desired = self.snapshot.get("desired_release") or {}
+        plan = self.snapshot.get("release_plan") or {}
+        host_id = self.snapshot.get("host_id")
+        host_plan = next((item for item in plan.get("hosts", []) if item.get("host_id") == host_id), {})
+        card = Card()
+        top = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("Production")
+        title.setObjectName("sectionTitle")
+        title_box.addWidget(title)
+        path = QLabel(comfy.get("path") or "No ComfyUI installation detected")
+        path.setObjectName("muted")
+        path.setWordWrap(True)
+        title_box.addWidget(path)
+        top.addLayout(title_box, 1)
+        if host_plan:
+            top.addWidget(badge("IN SYNC" if host_plan.get("in_sync") else "DRIFT", "good" if host_plan.get("in_sync") else "warn"))
+        card.body.addLayout(top)
+        for key, value in (
+            ("Comfy version", comfy.get("version") or "Unknown"),
+            ("Git commit", comfy.get("git_commit") or "Unknown"),
+            ("Python", comfy.get("python_executable") or "Unknown"),
+            ("Fleet release", desired.get("name") or "Not configured"),
+            ("Custom nodes", str(len(registration.get("nodes") or []))),
+            ("Models", str(len(registration.get("models") or []))),
+        ):
+            row = QHBoxLayout()
+            label = QLabel(key)
+            label.setObjectName("muted")
+            row.addWidget(label)
+            row.addStretch(1)
+            row.addWidget(QLabel(str(value)))
+            card.body.addLayout(row)
+        if host_plan.get("drift"):
+            drift = QLabel("Drift: " + ", ".join(item.get("kind", "unknown") for item in host_plan["drift"]))
+            drift.setStyleSheet("color:#ffd46e;")
+            drift.setWordWrap(True)
+            card.body.addWidget(drift)
+        buttons = QHBoxLayout()
+        open_button = QPushButton("Open ComfyUI")
+        open_button.setObjectName("primary")
+        open_button.clicked.connect(self.open_local_comfy)
+        buttons.addWidget(open_button)
+        refresh = QPushButton("Refresh Inventory")
+        refresh.clicked.connect(self.refresh_inventory)
+        buttons.addWidget(refresh)
+        buttons.addStretch(1)
+        card.body.addLayout(buttons)
+        self.comfy_layout.addWidget(card)
+        self.comfy_layout.addStretch(1)
+
+    @staticmethod
+    def _set_table(table: QTableWidget, rows: list[list[str]]) -> None:
+        table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                table.setItem(row_index, column_index, QTableWidgetItem(value))
+
+    def _render_models(self) -> None:
+        registration = self._registration()
+        local_keys = {
+            (str(item.get("category", "")).casefold(), str(item.get("name", "")).casefold())
+            for item in registration.get("models") or []
+        }
+        host_count = max(1, len(self.snapshot.get("hosts") or []))
+        rows = []
+        for item in self.snapshot.get("models") or []:
+            key = (str(item.get("category", "")).casefold(), str(item.get("name", "")).casefold())
+            rows.append([
+                str(item.get("name") or ""),
+                str(item.get("category") or ""),
+                fmt_size(item.get("size_bytes")),
+                "Yes" if key in local_keys else "No",
+                f"{item.get('host_count', 0)} / {host_count}",
+            ])
+        self._set_table(self.models_table, rows)
+
+    def _render_nodes(self) -> None:
+        host_id = self.snapshot.get("host_id")
+        host_count = max(1, len(self.snapshot.get("hosts") or []))
+        rows = []
+        for item in self.snapshot.get("nodes") or []:
+            hosts = item.get("hosts") or {}
+            local = hosts.get(host_id) or {}
+            commits = {str(value.get("git_commit")) for value in hosts.values() if value.get("git_commit")}
+            status = "Consistent" if len(commits) <= 1 and len(hosts) == host_count else "Check fleet"
+            rows.append([
+                str(item.get("name") or ""),
+                str(local.get("git_commit") or "Not installed"),
+                f"{len(hosts)} / {host_count}",
+                status,
+            ])
+        self._set_table(self.nodes_table, rows)
+
+    def _render_outputs(self) -> None:
+        rows = []
+        for job in (self.snapshot.get("jobs") or [])[:100]:
+            outputs = job.get("outputs") or {}
+            count = len(outputs)
+            rows.append([
+                str(job.get("state") or ""),
+                str(job.get("created_at") or "").replace("T", " ")[:19],
+                str(job.get("assigned_host_id") or ""),
+                str(job.get("assigned_worker_id") or ""),
+                str(count),
+                str(job.get("job_id") or "")[:12],
+            ])
+        self._set_table(self.outputs_table, rows)
+
+    def _render_cluster(self) -> None:
+        clear_layout(self.cluster_layout)
+        hosts = self.snapshot.get("hosts") or []
+        if not hosts:
+            empty = QLabel("Controller has no registered hosts yet.")
+            empty.setObjectName("muted")
+            self.cluster_layout.addWidget(empty)
+        for host in hosts:
+            card = Card()
+            top = QHBoxLayout()
+            name_box = QVBoxLayout()
+            name = QLabel(str(host.get("hostname") or host.get("host_id") or "Host"))
+            name.setObjectName("sectionTitle")
+            name_box.addWidget(name)
+            summary = QLabel(
+                f"{len(host.get('gpus') or [])} GPUs  |  {len(host.get('models') or [])} models  |  {len(host.get('nodes') or [])} nodes"
+            )
+            summary.setObjectName("muted")
+            name_box.addWidget(summary)
+            top.addLayout(name_box, 1)
+            if host.get("draining"):
+                top.addWidget(badge("DRAINING", "warn"))
+            top.addWidget(badge("ONLINE" if host.get("connected") else "OFFLINE", "good" if host.get("connected") else "bad"))
+            host_id = str(host.get("host_id"))
+            operation = "resume" if host.get("draining") else "drain"
+            button = QPushButton("Resume" if host.get("draining") else "Drain")
+            button.clicked.connect(
+                lambda _checked=False, hid=host_id, op=operation: self.host_mode(op, hid)
+            )
+            top.addWidget(button)
+            card.body.addLayout(top)
+            for worker in host.get("workers") or []:
+                gpu = next((item for item in host.get("gpus") or [] if item.get("uuid") == worker.get("gpu_uuid")), {})
+                row = QHBoxLayout()
+                row.addWidget(QLabel(str(gpu.get("name") or worker.get("worker_id"))), 1)
+                row.addWidget(QLabel(f"GPU {worker.get('gpu_index')}  :{worker.get('port')}"))
+                row.addWidget(badge(str(worker.get("state") or "unknown").upper()))
+                card.body.addLayout(row)
+            self.cluster_layout.addWidget(card)
+        self.cluster_layout.addStretch(1)
+
+    def _render_settings(self) -> None:
+        clear_layout(self.settings_layout)
+        card = Card()
+        for key, value in (
+            ("Controller", self.snapshot.get("controller_base") or ""),
+            ("Local agent API", self.settings.local_api_url),
+            ("Host ID", self.snapshot.get("host_id") or self.settings.host_id),
+            ("Refresh interval", f"{self.settings.desktop_refresh_seconds:.1f} seconds"),
+        ):
+            row = QHBoxLayout()
+            label = QLabel(key)
+            label.setObjectName("muted")
+            row.addWidget(label)
+            row.addStretch(1)
+            value_label = QLabel(str(value))
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(value_label)
+            card.body.addLayout(row)
+        buttons = QHBoxLayout()
+        admin = QPushButton("Open Controller Admin")
+        admin.clicked.connect(self.open_controller)
+        buttons.addWidget(admin)
+        refresh = QPushButton("Refresh Now")
+        refresh.clicked.connect(self.refresh_now)
+        buttons.addWidget(refresh)
+        buttons.addStretch(1)
+        card.body.addLayout(buttons)
+        self.settings_layout.addWidget(card)
+        self.settings_layout.addStretch(1)
 
     def _run_action(self, action: Callable[[], Any]) -> None:
         runner = ActionRunner(action)
@@ -648,8 +589,7 @@ class MainWindow(QMainWindow):
         self._run_action(lambda: self.api.local_fleet_action(operation))
 
     def restart_all_workers(self) -> None:
-        local = self.snapshot.get("local") or {}
-        workers = (local.get("registration") or {}).get("workers") or []
+        workers = self._registration().get("workers") or []
 
         def action():
             return [
@@ -670,8 +610,7 @@ class MainWindow(QMainWindow):
         self._run_action(lambda: self.api.host_mode(str(target), operation))
 
     def open_local_comfy(self) -> None:
-        local = self.snapshot.get("local") or {}
-        workers = (local.get("registration") or {}).get("workers") or []
+        workers = self._registration().get("workers") or []
         worker = next((item for item in workers if item.get("comfy_url")), None)
         if not worker:
             self._show_action_error("No local ComfyUI worker is available to open.")
@@ -681,7 +620,7 @@ class MainWindow(QMainWindow):
     def open_controller(self) -> None:
         QDesktopServices.openUrl(QUrl(self.api.controller_base))
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming convention
+    def closeEvent(self, event) -> None:  # noqa: N802
         self.poller.stop()
         self.poller.wait(3000)
         event.accept()
