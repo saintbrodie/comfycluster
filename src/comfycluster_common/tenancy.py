@@ -32,6 +32,7 @@ class UserRecord(BaseModel):
     active: bool = True
     max_queued_jobs: int = Field(default=10, ge=0)
     max_running_jobs: int = Field(default=2, ge=0)
+    max_submissions_per_minute: int = Field(default=20, ge=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
