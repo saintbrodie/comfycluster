@@ -58,6 +58,8 @@ class Scheduler:
 
             if not host.connected:
                 reasons.append("host_disconnected")
+            if host.draining:
+                reasons.append("host_draining")
             if worker.state is not WorkerState.IDLE:
                 reasons.append("worker_not_idle")
             if request.preferred_worker_id and worker.worker_id != request.preferred_worker_id:

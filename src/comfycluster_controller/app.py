@@ -108,6 +108,21 @@ def create_app(
     async def hosts():
         return await app.state.store.list_hosts()
 
+    @app.post("/api/v1/hosts/{host_id}/drain")
+    async def drain_host(host_id: str):
+        host = await app.state.store.set_host_draining(host_id, True)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        return host
+
+    @app.post("/api/v1/hosts/{host_id}/resume")
+    async def resume_host(host_id: str):
+        host = await app.state.store.set_host_draining(host_id, False)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        await dispatch_queued_jobs()
+        return host
+
     @app.get("/api/v1/workers")
     async def workers():
         entries = await app.state.store.list_workers()

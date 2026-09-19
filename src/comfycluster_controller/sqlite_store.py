@@ -84,7 +84,7 @@ class SQLiteFleetStore(FleetStore):
     def _persist_desired_release(self, manifest: ReleaseManifest) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('desired_release', ?)",
-            (manifest.model_dump_json(by_alias=True),),
+            (manifest.model_dump_json(),),
         )
         self._db.commit()
 
@@ -104,6 +104,12 @@ class SQLiteFleetStore(FleetStore):
         host = await super().get_host(host_id)
         if host:
             self._persist_host(host)
+
+    async def set_host_draining(self, host_id: str, draining: bool):
+        host = await super().set_host_draining(host_id, draining)
+        if host:
+            self._persist_host(host)
+        return host
 
     async def update_worker(
         self,

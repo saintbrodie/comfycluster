@@ -28,6 +28,7 @@ class FleetStore:
 
     async def register_host(self, registration: HostRegistration) -> HostView:
         async with self._lock:
+            previous = self._hosts.get(registration.host_id)
             view = HostView(
                 host_id=registration.host_id,
                 hostname=registration.hostname,
@@ -35,6 +36,7 @@ class FleetStore:
                 os_version=registration.os_version,
                 agent_version=registration.agent_version,
                 connected=True,
+                draining=previous.draining if previous else False,
                 last_seen=datetime.now(UTC),
                 gpus=registration.gpus,
                 comfy=registration.comfy,
@@ -73,6 +75,14 @@ class FleetStore:
                 host.connected = False
                 for worker in host.workers:
                     worker.state = WorkerState.OFFLINE
+
+    async def set_host_draining(self, host_id: str, draining: bool) -> HostView | None:
+        async with self._lock:
+            host = self._hosts.get(host_id)
+            if host is None:
+                return None
+            host.draining = draining
+            return host.model_copy(deep=True)
 
     async def list_hosts(self) -> list[HostView]:
         async with self._lock:

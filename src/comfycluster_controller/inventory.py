@@ -37,8 +37,18 @@ def node_matrix(hosts: list[HostView]) -> list[dict[str, Any]]:
     return [records[name] for name in sorted(records, key=str.lower)]
 
 
-def compare_release(host: HostView, manifest: ReleaseManifest) -> dict[str, Any]:
-    """Compare observed host state to a typed release manifest."""
+def compare_release(
+    host: HostView, manifest: ReleaseManifest | dict[str, Any]
+) -> dict[str, Any]:
+    """Compare observed host state to a release manifest.
+
+    Accepting a mapping here keeps the low-level comparison helper convenient
+    for callers and backwards-compatible while API/storage boundaries use the
+    validated ReleaseManifest model.
+    """
+    if not isinstance(manifest, ReleaseManifest):
+        manifest = ReleaseManifest.model_validate(manifest)
+
     drift: list[dict[str, Any]] = []
     desired_commit = manifest.comfy.commit
     observed_commit = host.comfy.git_commit if host.comfy else None

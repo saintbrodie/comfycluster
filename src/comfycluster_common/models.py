@@ -137,6 +137,7 @@ class HostView(BaseModel):
     os_version: str
     agent_version: str
     connected: bool = True
+    draining: bool = False
     last_seen: datetime = Field(default_factory=utcnow)
     gpus: list[GPUInfo] = Field(default_factory=list)
     comfy: ComfyInstallation | None = None
