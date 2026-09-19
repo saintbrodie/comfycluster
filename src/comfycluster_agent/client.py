@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 import websockets
+from websockets.asyncio.client import connect
 
 from comfycluster_common.models import AgentEvent, HostHeartbeat, HostRegistration
 from comfycluster_common.protocol import parse_controller_command
@@ -61,8 +62,12 @@ class AgentClient:
         backoff = 1.0
         while True:
             try:
-                async with websockets.connect(
+                headers = None
+                if self.settings.agent_token:
+                    headers = {"Authorization": f"Bearer {self.settings.agent_token}"}
+                async with connect(
                     self.settings.controller_url,
+                    additional_headers=headers,
                     ping_interval=20,
                     ping_timeout=20,
                     max_size=16 * 1024 * 1024,

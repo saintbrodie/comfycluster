@@ -21,19 +21,25 @@ from comfycluster_common.protocol import parse_agent_message
 from .connections import AgentConnectionManager
 from .inventory import compare_release, model_matrix, node_matrix
 from .scheduler import Scheduler
-from .settings import create_configured_store
+from .security import agent_authorized
+from .settings import ControllerSettings, create_configured_store
 from .store import FleetStore
 from .workflow import analyze_workflow
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(store: FleetStore | None = None, connections: AgentConnectionManager | None = None) -> FastAPI:
+def create_app(
+    store: FleetStore | None = None,
+    connections: AgentConnectionManager | None = None,
+    agent_token: str | None = None,
+) -> FastAPI:
     app = FastAPI(title="ComfyCluster Controller", version="0.1.0")
     app.state.store = store or FleetStore()
     app.state.connections = connections or AgentConnectionManager()
     app.state.scheduler = Scheduler()
     app.state.dispatch_lock = asyncio.Lock()
+    app.state.agent_token = agent_token
 
     async def dispatch_job(job: JobRecord):
         async with app.state.dispatch_lock:
@@ -198,6 +204,10 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
 
     @app.websocket("/api/v1/agents/ws")
     async def agent_socket(websocket: WebSocket):
+        if not agent_authorized(websocket.headers.get("authorization"), app.state.agent_token):
+            await websocket.close(code=1008, reason="unauthorized agent")
+            return
+
         await websocket.accept()
         host_id: str | None = None
         try:
@@ -283,4 +293,5 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
     return app
 
 
-app = create_app(create_configured_store())
+_controller_settings = ControllerSettings()
+app = create_app(create_configured_store(), agent_token=_controller_settings.agent_token)

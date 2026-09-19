@@ -9,6 +9,7 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="COMFYCLUSTER_", env_file=".env", extra="ignore")
 
     controller_url: str = "ws://127.0.0.1:9320/api/v1/agents/ws"
+    agent_token: str | None = None
     comfy_home: Path | None = None
     comfy_cli_executable: str = "comfy"
     base_port: int = 8188

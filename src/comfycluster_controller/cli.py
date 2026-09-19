@@ -1,4 +1,5 @@
 import os
+import secrets
 
 import typer
 import uvicorn
@@ -17,6 +18,12 @@ def serve(
     if database:
         os.environ["COMFYCLUSTER_DATABASE_PATH"] = database
     uvicorn.run("comfycluster_controller.app:app", host=host, port=port, reload=reload)
+
+
+@app.command("new-agent-token")
+def new_agent_token() -> None:
+    """Generate a strong bootstrap token for controller-to-agent enrollment."""
+    typer.echo(secrets.token_urlsafe(32))
 
 
 if __name__ == "__main__":

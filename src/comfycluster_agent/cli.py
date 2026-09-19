@@ -14,6 +14,10 @@ app = typer.Typer(help="Run the ComfyCluster Windows worker agent.")
 @app.command()
 def run(
     controller: str | None = typer.Option(None, help="Controller WebSocket URL"),
+    agent_token: str | None = typer.Option(
+        None,
+        help="Controller bootstrap token. Prefer COMFYCLUSTER_AGENT_TOKEN or the installer config so it is not exposed in process arguments.",
+    ),
     comfy_home: str | None = typer.Option(None, help="Path to ComfyUI"),
     mock_gpus: int | None = typer.Option(None, help="Create fake GPUs for development"),
 ) -> None:
@@ -21,6 +25,8 @@ def run(
     updates = {}
     if controller is not None:
         updates["controller_url"] = controller
+    if agent_token is not None:
+        updates["agent_token"] = agent_token
     if comfy_home is not None:
         updates["comfy_home"] = comfy_home
     if mock_gpus is not None:

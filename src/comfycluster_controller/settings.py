@@ -9,6 +9,7 @@ class ControllerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="COMFYCLUSTER_", env_file=".env", extra="ignore")
 
     database_path: Path | None = None
+    agent_token: str | None = None
 
 
 def create_configured_store():
