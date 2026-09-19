@@ -7,6 +7,7 @@ import socket
 from pathlib import Path
 from uuid import UUID
 
+import uvicorn
 import websockets
 from websockets.asyncio.client import connect
 
@@ -17,6 +18,7 @@ from .comfy import discover_comfy
 from .comfy_cli import ComfyCliAdapter
 from .gpu import discover_gpus
 from .inventory import scan_custom_nodes, scan_models
+from .local_api import create_local_app
 from .runtime import NativeWindowsRuntime
 from .settings import AgentSettings
 
@@ -35,6 +37,7 @@ class AgentClient:
         cli_workspace = Path(self.comfy.path) if self.comfy else Path.cwd()
         self.comfy_cli_adapter = ComfyCliAdapter(cli_workspace, settings.comfy_cli_executable)
         self.comfy_cli = self.comfy_cli_adapter.discover_info()
+        self.controller_connected = False
 
     @staticmethod
     def _host_id() -> str:
@@ -55,10 +58,38 @@ class AgentClient:
             models=self.models,
         )
 
+    def local_status(self) -> dict:
+        return {
+            "controller_connected": self.controller_connected,
+            "controller_url": self.settings.controller_url,
+            "local_api": f"http://{self.settings.local_api_host}:{self.settings.local_api_port}",
+            "registration": self.registration().model_dump(mode="json"),
+        }
+
     async def run(self) -> None:
         if self.settings.autostart_workers and self.comfy:
             self.runtime.start_all()
 
+        local_api_task = asyncio.create_task(self._run_local_api())
+        try:
+            await self._controller_loop()
+        finally:
+            local_api_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await local_api_task
+
+    async def _run_local_api(self) -> None:
+        config = uvicorn.Config(
+            create_local_app(self),
+            host=self.settings.local_api_host,
+            port=self.settings.local_api_port,
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    async def _controller_loop(self) -> None:
         backoff = 1.0
         while True:
             try:
@@ -74,16 +105,19 @@ class AgentClient:
                 ) as websocket:
                     await websocket.send(self.registration().model_dump_json())
                     await websocket.recv()
+                    self.controller_connected = True
                     backoff = 1.0
                     heartbeat_task = asyncio.create_task(self._heartbeat_loop(websocket))
                     try:
                         async for raw in websocket:
                             await self._handle_command(websocket, raw)
                     finally:
+                        self.controller_connected = False
                         heartbeat_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await heartbeat_task
             except (OSError, websockets.WebSocketException):
+                self.controller_connected = False
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
 
@@ -115,7 +149,7 @@ class AgentClient:
     async def _handle_command(self, websocket, raw: str | bytes) -> None:
         command = parse_controller_command(raw)
         try:
-            payload = await self._execute(command.action, command.payload)
+            payload = await self.execute_action(command.action, command.payload)
             if command.action == "job.submit":
                 event = AgentEvent(
                     host_id=self.host_id,
@@ -160,7 +194,7 @@ class AgentClient:
             )
         await websocket.send(event.model_dump_json())
 
-    async def _execute(self, action: str, payload: dict) -> dict:
+    async def execute_action(self, action: str, payload: dict) -> dict:
         if action == "worker.start":
             return self.runtime.start(payload["worker_id"]).model_dump(mode="json")
         if action == "worker.stop":
@@ -192,6 +226,8 @@ class AgentClient:
         if action == "inventory.refresh":
             self.gpus = discover_gpus(self.settings.mock_gpus)
             self.comfy = discover_comfy(self.settings.comfy_home)
+            self.runtime.gpus = self.gpus
+            self.runtime.comfy = self.comfy
             self.nodes = scan_custom_nodes(Path(self.comfy.path)) if self.comfy else []
             self.models = scan_models(Path(self.comfy.path)) if self.comfy else []
             cli_workspace = Path(self.comfy.path) if self.comfy else Path.cwd()

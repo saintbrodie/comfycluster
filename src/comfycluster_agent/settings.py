@@ -16,3 +16,5 @@ class AgentSettings(BaseSettings):
     heartbeat_seconds: float = 5.0
     autostart_workers: bool = True
     mock_gpus: int = 0
+    local_api_host: str = "127.0.0.1"
+    local_api_port: int = 9321
