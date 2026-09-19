@@ -1,6 +1,7 @@
 {
   "name": "comfy-prod-001",
   "comfy": {
+    "version": null,
     "ref": "master",
     "commit": null
   },
@@ -11,7 +12,17 @@
     {
       "name": "ComfyUI-Manager",
       "repo": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
+      "version": null,
       "commit": null
+    }
+  ],
+  "models": [
+    {
+      "category": "checkpoints",
+      "name": "example.safetensors",
+      "sha256": null,
+      "size_bytes": null,
+      "source": null
     }
   ],
   "launch": {

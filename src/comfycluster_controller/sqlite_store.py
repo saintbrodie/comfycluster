@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import UUID
 
 from comfycluster_common.models import HostView, JobRecord, JobState, WorkerState
+from comfycluster_common.releases import ReleaseManifest
 
 from .store import FleetStore
 
@@ -62,6 +63,10 @@ class SQLiteFleetStore(FleetStore):
         for job in dirty_jobs:
             self._persist_job(job)
 
+        row = self._db.execute("SELECT value FROM meta WHERE key='desired_release'").fetchone()
+        if row:
+            self._desired_release = ReleaseManifest.model_validate_json(row[0])
+
     def _persist_host(self, host: HostView) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO hosts(host_id, data) VALUES(?, ?)",
@@ -73,6 +78,13 @@ class SQLiteFleetStore(FleetStore):
         self._db.execute(
             "INSERT OR REPLACE INTO jobs(job_id, data) VALUES(?, ?)",
             (str(job.job_id), job.model_dump_json()),
+        )
+        self._db.commit()
+
+    def _persist_desired_release(self, manifest: ReleaseManifest) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('desired_release', ?)",
+            (manifest.model_dump_json(by_alias=True),),
         )
         self._db.commit()
 
@@ -122,6 +134,11 @@ class SQLiteFleetStore(FleetStore):
         if job:
             self._persist_job(job)
         return job
+
+    async def set_desired_release(self, manifest: ReleaseManifest) -> ReleaseManifest:
+        stored = await super().set_desired_release(manifest)
+        self._persist_desired_release(stored)
+        return stored
 
     async def seed_hosts(self, hosts) -> None:
         await super().seed_hosts(hosts)

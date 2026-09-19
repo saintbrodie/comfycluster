@@ -14,18 +14,16 @@ from comfycluster_common.models import (
     WorkerSnapshot,
     WorkerState,
 )
+from comfycluster_common.releases import ReleaseManifest
 
 
 class FleetStore:
-    """Small in-memory store for the first vertical slice.
-
-    The public methods intentionally resemble repository operations so this can
-    be swapped for SQLAlchemy/PostgreSQL without changing the scheduler/API.
-    """
+    """In-memory repository contract used by the controller."""
 
     def __init__(self) -> None:
         self._hosts: dict[str, HostView] = {}
         self._jobs: dict[UUID, JobRecord] = {}
+        self._desired_release: ReleaseManifest | None = None
         self._lock = asyncio.Lock()
 
     async def register_host(self, registration: HostRegistration) -> HostView:
@@ -140,6 +138,15 @@ class FleetStore:
 
     async def set_job_state(self, job_id: UUID, state: JobState, **changes: object) -> JobRecord | None:
         return await self.update_job(job_id, state=state, **changes)
+
+    async def set_desired_release(self, manifest: ReleaseManifest) -> ReleaseManifest:
+        async with self._lock:
+            self._desired_release = manifest.model_copy(deep=True)
+            return self._desired_release.model_copy(deep=True)
+
+    async def get_desired_release(self) -> ReleaseManifest | None:
+        async with self._lock:
+            return self._desired_release.model_copy(deep=True) if self._desired_release else None
 
     async def seed_hosts(self, hosts: Iterable[HostView]) -> None:
         async with self._lock:

@@ -17,9 +17,11 @@ from comfycluster_common.models import (
     WorkerState,
 )
 from comfycluster_common.protocol import parse_agent_message
+from comfycluster_common.releases import ReleaseManifest
 
 from .connections import AgentConnectionManager
 from .inventory import compare_release, model_matrix, node_matrix
+from .releases import plan_release
 from .scheduler import Scheduler
 from .security import agent_authorized
 from .settings import ControllerSettings, create_configured_store
@@ -127,12 +129,30 @@ def create_app(
         return node_matrix(await app.state.store.list_hosts())
 
     @app.post("/api/v1/releases/compare")
-    async def release_compare(manifest: dict):
+    async def release_compare(manifest: ReleaseManifest):
         hosts = await app.state.store.list_hosts()
         return {
-            "release": manifest.get("name"),
+            "release": manifest.name,
             "hosts": [compare_release(host, manifest) for host in hosts],
         }
+
+    @app.put("/api/v1/releases/desired")
+    async def set_desired_release(manifest: ReleaseManifest):
+        return await app.state.store.set_desired_release(manifest)
+
+    @app.get("/api/v1/releases/desired")
+    async def get_desired_release():
+        manifest = await app.state.store.get_desired_release()
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="desired release not configured")
+        return manifest
+
+    @app.get("/api/v1/releases/plan")
+    async def release_plan():
+        manifest = await app.state.store.get_desired_release()
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="desired release not configured")
+        return plan_release(await app.state.store.list_hosts(), manifest)
 
     @app.post("/api/v1/workflows/analyze")
     async def workflow_analyze(workflow: dict):

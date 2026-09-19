@@ -11,6 +11,7 @@ from comfycluster_common.models import (
     WorkerSnapshot,
     WorkerState,
 )
+from comfycluster_common.releases import ReleaseManifest
 from comfycluster_controller.sqlite_store import SQLiteFleetStore
 
 
@@ -64,4 +65,25 @@ async def test_active_job_is_failed_after_controller_restart(tmp_path: Path):
     assert restored is not None
     assert restored.state is JobState.FAILED
     assert "terminal state is unknown" in (restored.error or "")
+    second.close()
+
+
+@pytest.mark.asyncio
+async def test_desired_release_survives_restart(tmp_path: Path):
+    path = tmp_path / "fleet.db"
+    first = SQLiteFleetStore(path)
+    desired = ReleaseManifest.model_validate(
+        {
+            "name": "production-17",
+            "comfy": {"version": "0.4.0", "commit": "abc123"},
+            "nodes": [{"name": "KJNodes", "commit": "def456"}],
+        }
+    )
+    await first.set_desired_release(desired)
+    first.close()
+
+    second = SQLiteFleetStore(path)
+    restored = await second.get_desired_release()
+    assert restored is not None
+    assert restored == desired
     second.close()
