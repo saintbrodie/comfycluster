@@ -13,11 +13,22 @@ def serve(
     port: int = 9320,
     reload: bool = False,
     database: str | None = None,
+    ssl_certfile: str | None = typer.Option(None, help="TLS certificate file for HTTPS/WSS"),
+    ssl_keyfile: str | None = typer.Option(None, help="TLS private-key file for HTTPS/WSS"),
 ) -> None:
     """Start the controller API and dashboard."""
     if database:
         os.environ["COMFYCLUSTER_DATABASE_PATH"] = database
-    uvicorn.run("comfycluster_controller.app:app", host=host, port=port, reload=reload)
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        raise typer.BadParameter("--ssl-certfile and --ssl-keyfile must be supplied together")
+    uvicorn.run(
+        "comfycluster_controller.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+    )
 
 
 @app.command("new-agent-token")

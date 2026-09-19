@@ -1,0 +1,57 @@
+name: Build Windows Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/build-agent.ps1"
+      - "scripts/build-controller.ps1"
+      - "scripts/install-agent.ps1"
+      - "scripts/uninstall-agent.ps1"
+      - "scripts/install-controller.ps1"
+      - "scripts/uninstall-controller.ps1"
+      - "pyproject.toml"
+      - ".github/workflows/build-windows-bundle.yml"
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build agent
+        shell: pwsh
+        run: .\scripts\build-agent.ps1
+      - name: Smoke-test agent
+        shell: pwsh
+        run: .\dist\comfycluster-agent.exe doctor --mock-gpus 2
+      - name: Build controller
+        shell: pwsh
+        run: .\scripts\build-controller.ps1
+      - name: Smoke-test controller
+        shell: pwsh
+        run: |
+          .\dist\comfycluster-controller.exe --help
+          $token = .\dist\comfycluster-controller.exe new-agent-token
+          if (-not $token -or $token.Length -lt 32) { throw "Controller token generation failed" }
+      - name: Stage bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bundle | Out-Null
+          Copy-Item .\dist\comfycluster-agent.exe .\bundle\
+          Copy-Item .\dist\comfycluster-controller.exe .\bundle\
+          Copy-Item .\scripts\install-agent.ps1 .\bundle\
+          Copy-Item .\scripts\uninstall-agent.ps1 .\bundle\
+          Copy-Item .\scripts\install-controller.ps1 .\bundle\
+          Copy-Item .\scripts\uninstall-controller.ps1 .\bundle\
+          Copy-Item .\docs\windows-deployment.md .\bundle\README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comfycluster-windows-x64
+          path: bundle/
