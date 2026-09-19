@@ -8,8 +8,18 @@ if ($task) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
+$shortcutPaths = @(
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "ComfyCluster.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Programs")) "ComfyCluster.lnk")
+)
+foreach ($shortcutPath in $shortcutPaths) {
+    if (Test-Path $shortcutPath) {
+        Remove-Item -Force $shortcutPath
+    }
+}
+
 if (Test-Path $installDir) {
     Remove-Item -Recurse -Force $installDir
 }
 
-Write-Host "ComfyCluster agent startup task removed."
+Write-Host "ComfyCluster desktop and agent startup task removed."

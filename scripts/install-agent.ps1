@@ -8,13 +8,23 @@ param(
 
     [string]$ComfyCliExecutable,
 
-    [string]$AgentExe = ".\dist\comfycluster-agent.exe"
+    [string]$AgentExe = ".\comfycluster-agent.exe",
+
+    [string]$DesktopExe = ".\ComfyCluster.exe",
+
+    [bool]$LaunchDesktop = $true
 )
 
 $ErrorActionPreference = "Stop"
 
+if (-not (Test-Path $AgentExe) -and (Test-Path ".\dist\comfycluster-agent.exe")) {
+    $AgentExe = ".\dist\comfycluster-agent.exe"
+}
+if (-not (Test-Path $DesktopExe) -and (Test-Path ".\dist\ComfyCluster.exe")) {
+    $DesktopExe = ".\dist\ComfyCluster.exe"
+}
 if (-not (Test-Path $AgentExe)) {
-    throw "Agent executable not found at '$AgentExe'. Run scripts\build-agent.ps1 first."
+    throw "Agent executable not found at '$AgentExe'."
 }
 
 function ConvertTo-DotEnvValue([string]$Value) {
@@ -28,9 +38,13 @@ function Find-ExistingSetting([string[]]$Lines, [string]$Name) {
 
 $installDir = Join-Path $env:LOCALAPPDATA "ComfyCluster"
 $targetExe = Join-Path $installDir "comfycluster-agent.exe"
+$targetDesktop = Join-Path $installDir "ComfyCluster.exe"
 $configPath = Join-Path $installDir ".env"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item -Force $AgentExe $targetExe
+if (Test-Path $DesktopExe) {
+    Copy-Item -Force $DesktopExe $targetDesktop
+}
 
 $existing = @()
 if (Test-Path $configPath) {
@@ -62,6 +76,11 @@ if ($ComfyCliExecutable) {
     if ($line) { $config += $line }
 }
 
+foreach ($settingName in @("COMFYCLUSTER_LOCAL_API_HOST", "COMFYCLUSTER_LOCAL_API_PORT", "COMFYCLUSTER_DESKTOP_REFRESH_SECONDS")) {
+    $line = Find-ExistingSetting $existing $settingName
+    if ($line) { $config += $line }
+}
+
 $config | Set-Content -Encoding UTF8 $configPath
 
 $taskName = "ComfyCluster Agent"
@@ -84,8 +103,29 @@ Register-ScheduledTask `
     -Description "ComfyCluster Windows GPU worker agent" `
     -Force | Out-Null
 
+if (Test-Path $targetDesktop) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcutPaths = @(
+        (Join-Path ([Environment]::GetFolderPath("Desktop")) "ComfyCluster.lnk"),
+        (Join-Path ([Environment]::GetFolderPath("Programs")) "ComfyCluster.lnk")
+    )
+    foreach ($shortcutPath in $shortcutPaths) {
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $targetDesktop
+        $shortcut.WorkingDirectory = $installDir
+        $shortcut.IconLocation = $targetDesktop
+        $shortcut.Save()
+    }
+}
+
 Start-ScheduledTask -TaskName $taskName
 Write-Host "Installed and started '$taskName'."
 Write-Host "Agent: $targetExe"
 Write-Host "Config: $configPath"
 Write-Host "Controller: $ControllerUrl"
+if (Test-Path $targetDesktop) {
+    Write-Host "Desktop: $targetDesktop"
+    if ($LaunchDesktop) {
+        Start-Process -FilePath $targetDesktop -WorkingDirectory $installDir
+    }
+}

@@ -8,6 +8,7 @@ on:
       - "src/**"
       - "scripts/build-agent.ps1"
       - "scripts/build-controller.ps1"
+      - "scripts/build-desktop.ps1"
       - "scripts/install-agent.ps1"
       - "scripts/uninstall-agent.ps1"
       - "scripts/install-controller.ps1"
@@ -40,10 +41,17 @@ jobs:
           .\dist\comfycluster-controller.exe --help
           $token = .\dist\comfycluster-controller.exe new-agent-token
           if (-not $token -or $token.Length -lt 32) { throw "Controller token generation failed" }
+      - name: Build desktop
+        shell: pwsh
+        run: .\scripts\build-desktop.ps1
+      - name: Smoke-test desktop
+        shell: pwsh
+        run: .\dist\ComfyCluster.exe --diagnostics
       - name: Stage bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force bundle | Out-Null
+          Copy-Item .\dist\ComfyCluster.exe .\bundle\
           Copy-Item .\dist\comfycluster-agent.exe .\bundle\
           Copy-Item .\dist\comfycluster-controller.exe .\bundle\
           Copy-Item .\scripts\install-agent.ps1 .\bundle\

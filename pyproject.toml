@@ -31,10 +31,14 @@ dev = [
 packaging = [
   "pyinstaller>=6.10",
 ]
+desktop = [
+  "PySide6-Essentials>=6.8,<7",
+]
 
 [project.scripts]
 comfycluster-controller = "comfycluster_controller.cli:app"
 comfycluster-agent = "comfycluster_agent.cli:app"
+comfycluster-desktop = "comfycluster_desktop.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
