@@ -107,3 +107,30 @@ def test_scheduler_keeps_backwards_compatibility_without_capability_inventory():
     candidate = scheduler.choose(request, [(host, worker)])
 
     assert candidate is not None
+
+
+def test_scheduler_assessment_explains_rejection():
+    scheduler = Scheduler()
+    host, worker = _host("a", "GPU-A", 16384, 4000, WorkerState.IDLE)
+    worker.node_types = ["KSampler"]
+    request = JobSubmitRequest(
+        minimum_vram_mb=24000,
+        workflow={
+            "1": {
+                "class_type": "FancyCustomNode",
+                "inputs": {"ckpt_name": "missing.safetensors"},
+            }
+        },
+    )
+
+    assessment = scheduler.evaluate(request, [(host, worker)])[0]
+
+    assert assessment.eligible is False
+    assert assessment.free_vram_mb == 12384
+    assert assessment.missing_models == ["missing.safetensors"]
+    assert assessment.missing_node_types == ["FancyCustomNode"]
+    assert assessment.reasons == [
+        "insufficient_vram",
+        "missing_models",
+        "missing_node_types",
+    ]

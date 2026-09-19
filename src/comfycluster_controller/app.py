@@ -132,6 +132,21 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
     async def workflow_analyze(workflow: dict):
         return analyze_workflow(workflow).as_dict()
 
+    @app.post("/api/v1/workflows/compatibility")
+    async def workflow_compatibility(request: JobSubmitRequest):
+        requirements = analyze_workflow(request.workflow)
+        assessments = app.state.scheduler.evaluate(
+            request,
+            await app.state.store.list_workers(),
+        )
+        return {
+            "requirements": requirements.as_dict(),
+            "eligible_workers": [
+                assessment.worker.worker_id for assessment in assessments if assessment.eligible
+            ],
+            "workers": [assessment.as_dict() for assessment in assessments],
+        }
+
     @app.post("/api/v1/hosts/{host_id}/commands/{action}")
     async def host_command(host_id: str, action: str, payload: dict | None = None):
         try:
