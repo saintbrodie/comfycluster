@@ -1,32 +1,55 @@
 # ComfyCluster
 
-**ComfyCluster is a Windows-first fleet manager and scheduler for ComfyUI.**
+**ComfyCluster is a Windows-first desktop app, fleet manager, and scheduler for ComfyUI.**
 
-The goal is to make several GPU workstations behave like one managed Comfy resource pool without turning the user into a cluster administrator.
+The goal is to make several GPU workstations behave like one managed Comfy resource pool without turning artists or operators into cluster administrators.
 
-> Current status: working early prototype. Windows agents can discover GPUs and ComfyUI, launch one worker per GPU, register with a central controller, report live Comfy capabilities, and execute workflows through a global compatibility-aware scheduler. The controller has a web dashboard, durable SQLite option, job lifecycle tracking, model/custom-node inventory, and release-drift groundwork.
+> Current status: working early prototype. The Windows desktop, background agent, and controller are all packaged as standalone executables. Agents can discover GPUs and ComfyUI, launch one worker per GPU, report live capabilities, inventory models/custom nodes, and execute workflows through a global compatibility-aware scheduler. The controller persists jobs, fleet state, desired releases, and host drain state.
 
-## Architecture
+## Product shape
+
+A normal Windows workstation gets two ComfyCluster components:
 
 ```text
-                         ComfyCluster
-                              |
-                +-------------+-------------+
-                |                           |
-          Unified Comfy UI             Agent / MCP
-                |                           |
-                +-------------+-------------+
-                              |
-                         Controller
-                    /         |         \
-                   /          |          \
-               PC 1          PC 2        PC 3
-              GPU0/1        GPU0/1      GPU0/1
+ComfyCluster.exe
+  User-facing desktop application
+  Home / Comfy / Models / Nodes / Outputs / Cluster / Settings
+        |
+        | localhost only
+        v
+comfycluster-agent.exe
+  Background Scheduled Task
+  GPU discovery, Comfy lifecycle, inventory, jobs
+        |
+        | outbound authenticated WebSocket
+        v
+ComfyCluster Controller
+  Desired state, fleet inventory, scheduling, releases
+        |
+        +---- Windows PC 1 -> GPU 0 / GPU 1
+        +---- Windows PC 2 -> GPU 0 / GPU 1
+        +---- Windows PC 3 -> GPU 0 / GPU 1
 ```
 
-Each Windows workstation runs a lightweight outbound agent. The agent discovers NVIDIA GPUs and manages one long-lived ComfyUI process per GPU. The controller owns fleet inventory, desired state, job scheduling, compatibility decisions, and centralized status.
+Closing `ComfyCluster.exe` does not stop local Comfy workers or remove the machine from the cluster. The agent keeps running in the background.
 
 Kubernetes may become a runtime for larger Linux deployments later, but it is not required. Native Windows is the first target.
+
+## Desktop application
+
+The first desktop build is intentionally modeled after the local-first package-management experience of tools like Stability Matrix, but focused only on ComfyUI and the cluster.
+
+Implemented screens:
+
+- **Home**: local GPU/VRAM state, cluster connection, Production Comfy summary, one worker per GPU, Start/Stop/Restart, Drain/Resume, Open ComfyUI
+- **Comfy**: detected environment, Comfy version/commit/Python, desired fleet release, drift state, inventory refresh
+- **Models**: cluster model inventory, size/category, whether the model is on this PC, host availability
+- **Custom Nodes**: local commit, host coverage, basic consistency view
+- **Outputs**: recent cluster jobs and output metadata
+- **Cluster**: all registered Windows hosts and their GPU workers, connectivity and drain state
+- **Settings**: controller/local-agent endpoints and direct controller-admin access
+
+The desktop uses the local agent API on `127.0.0.1:9321` for workstation controls, so Start/Stop/Restart remains available if the central controller is temporarily unavailable. Fleet policy such as Drain/Resume remains controller-owned.
 
 ## Implemented
 
@@ -38,7 +61,9 @@ Kubernetes may become a runtime for larger Linux deployments later, but it is no
 - one logical Comfy worker per physical GPU
 - native worker launch using `--cuda-device` and unique ports
 - start, stop, restart, health probing, process supervision, and per-worker logs
+- localhost desktop-control API bound to `127.0.0.1` by default
 - automatic reconnect to the controller
+- authenticated outbound WebSocket connection
 - Comfy `/prompt` submission, history polling, cancellation, and output metadata reporting
 - custom-node and model inventory, including `extra_model_paths.yaml`
 - live `/object_info` capability discovery so each worker reports the node types it can actually execute
@@ -47,17 +72,19 @@ Kubernetes may become a runtime for larger Linux deployments later, but it is no
 
 ### Controller
 
-- FastAPI control plane and dark web dashboard
+- FastAPI control plane and web admin dashboard
 - outbound-agent WebSocket protocol
 - host/GPU/worker inventory and disconnect handling
+- persistent host Drain/Resume state
 - cluster model and custom-node availability matrices
 - global job queue with worker reservations
 - job dispatch, completion, failure, cancellation, and output tracking
 - optional SQLite persistence and restart recovery behavior
-- release manifest comparison for Comfy commit, node commit, and model drift
+- persisted typed desired-release manifest
+- release comparison and rollout planning for Comfy, node, and model drift
 - workflow requirement analysis for node types and model references
-- compatibility-aware scheduling using connectivity, worker state, VRAM, models, and live registered Comfy node types
-- per-worker compatibility explanations such as `missing_models`, `missing_node_types`, and `insufficient_vram`
+- compatibility-aware scheduling using connectivity, drain state, worker state, VRAM, models, and live registered Comfy node types
+- per-worker compatibility explanations such as `missing_models`, `missing_node_types`, `insufficient_vram`, and `host_draining`
 
 ### Official Comfy tooling integration
 
@@ -71,6 +98,25 @@ The first `comfy-cli` adapter supports:
 - `comfy update comfy --version ...`
 
 The longer-term public execution surface should follow official Comfy API v2 semantics, and cluster-aware MCP is planned on top of the same controller.
+
+## Windows bundle
+
+GitHub Actions builds a standalone `comfycluster-windows-x64` artifact containing:
+
+```text
+ComfyCluster.exe
+comfycluster-agent.exe
+comfycluster-controller.exe
+install-agent.ps1
+uninstall-agent.ps1
+install-controller.ps1
+uninstall-controller.ps1
+README.md
+```
+
+The workstation installer copies the desktop and agent into `%LOCALAPPDATA%\ComfyCluster`, creates Desktop/Start Menu shortcuts, installs the background Scheduled Task, and launches the desktop app.
+
+See [docs/windows-deployment.md](docs/windows-deployment.md) for the current deployment flow.
 
 ## Development demo
 
@@ -93,7 +139,14 @@ Then in another terminal:
 .\.venv\Scripts\comfycluster-agent.exe run --mock-gpus 2
 ```
 
-Open `http://127.0.0.1:9320`.
+For desktop development, install the desktop extra and launch:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\comfycluster-desktop.exe
+```
+
+The controller admin UI is at `http://127.0.0.1:9320`. The local agent API defaults to `http://127.0.0.1:9321`.
 
 On a real Comfy machine:
 
@@ -110,13 +163,20 @@ $env:COMFYCLUSTER_COMFY_CLI_EXECUTABLE = "C:\path\to\comfy.exe"
 
 ## Useful API endpoints
 
+Controller:
+
 - `GET /api/v1/health`
 - `GET /api/v1/hosts`
+- `POST /api/v1/hosts/{host}/drain`
+- `POST /api/v1/hosts/{host}/resume`
 - `GET /api/v1/workers`
 - `GET /api/v1/models`
 - `GET /api/v1/nodes`
 - `POST /api/v1/workflows/analyze`
 - `POST /api/v1/workflows/compatibility`
+- `PUT /api/v1/releases/desired`
+- `GET /api/v1/releases/desired`
+- `GET /api/v1/releases/plan`
 - `POST /api/v1/releases/compare`
 - `POST /api/v1/hosts/{host}/commands/{action}`
 - `GET /api/v1/jobs`
@@ -124,34 +184,41 @@ $env:COMFYCLUSTER_COMFY_CLI_EXECUTABLE = "C:\path\to\comfy.exe"
 - `POST /api/v1/jobs/{job}/cancel`
 - `WS /api/v1/agents/ws`
 
-A submitted job contains an API-format Comfy workflow. The scheduler analyzes the graph before dispatch and only selects an eligible worker when capability information is available.
+Local agent:
+
+- `GET /api/v1/status`
+- `POST /api/v1/workers/{worker}/{start|stop|restart}`
+- `POST /api/v1/fleet/{start|stop}`
+- `POST /api/v1/inventory/refresh`
 
 ## Design principles
 
-1. **The controller owns desired state and scheduling.**
-2. **The Windows agent owns local process/GPU supervision.**
-3. **Comfy itself remains the execution engine.**
-4. **Official Comfy tooling handles Comfy-specific package mechanics wherever practical.**
-5. **Models are data, not application releases.** Large model synchronization is managed separately from Comfy/custom-node releases.
-6. **Workers advertise runtime truth.** `/object_info`, model inventory, GPU state, and management-tool capability determine eligibility.
-7. **A worker should require no inbound management port.** The agent maintains the outbound controller connection.
+1. **The desktop is the user product.** Normal operators should not need to interact with service processes or cluster infrastructure.
+2. **The controller owns desired state and scheduling.**
+3. **The Windows agent owns local process/GPU supervision.**
+4. **Comfy itself remains the execution engine and graph editor.**
+5. **Official Comfy tooling handles Comfy-specific package mechanics wherever practical.**
+6. **Models are data, not application releases.** Large model synchronization is managed separately from Comfy/custom-node releases.
+7. **Workers advertise runtime truth.** `/object_info`, model inventory, GPU state, and management-tool capability determine eligibility.
+8. **A worker should require no inbound remote-management port.** Only the localhost desktop API is exposed on the workstation by default.
 
 ## Near-term priorities
 
-1. make a repeatable three-PC Windows deployment and upgrade flow
-2. finish `comfy-cli` desired-state/release reconciliation and canary rollback
-3. add controller-triggered model synchronization with hashing and integrity verification
-4. add secure agent enrollment and controller authentication
-5. add retries/draining and stronger failure recovery
-6. expose a cluster-level Comfy API v2-compatible surface
-7. serve one unified Comfy workspace backed by the global scheduler
-8. add cluster-aware MCP and gated agentic administration
+1. exercise the Windows desktop bundle on the real three-PC fleet
+2. finish canary Comfy release apply/rollback on drained hosts
+3. add custom-node desired-state reconciliation
+4. add controller-triggered model synchronization with hashing and integrity verification
+5. improve the Outputs page into a real image/video gallery with metadata and workflow reload
+6. add first-run desktop enrollment/setup instead of PowerShell being the primary onboarding surface
+7. expose a cluster-level Comfy API v2-compatible surface
+8. serve one unified Comfy workspace backed by the global scheduler
+9. add cluster-aware MCP and gated agentic administration
 
 See [docs/architecture.md](docs/architecture.md) and [docs/roadmap.md](docs/roadmap.md).
 
 ## Prior art
 
-ComfyCluster is deliberately borrowing proven ideas from SwarmUI, ComfyDeploy, distributed Comfy schedulers, Stability Matrix, Salad's Comfy API wrapper, the Windows Comfy portable installer ecosystem, and official Comfy projects such as `comfy-cli`, `comfy-api-proxy`, and `comfy-mcp`.
+ComfyCluster deliberately borrows proven ideas from SwarmUI, ComfyDeploy, distributed Comfy schedulers, Stability Matrix, Salad's Comfy API wrapper, the Windows Comfy portable installer ecosystem, and official Comfy projects such as `comfy-cli`, `comfy-api-proxy`, and `comfy-mcp`.
 
 ## License
 
