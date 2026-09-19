@@ -3,6 +3,13 @@ name: Build Windows Agent
 on:
   workflow_dispatch:
   push:
+    branches: [main]
+    paths:
+      - "src/comfycluster_agent/**"
+      - "src/comfycluster_common/**"
+      - "scripts/build-agent.ps1"
+      - "pyproject.toml"
+      - ".github/workflows/build-agent.yml"
     tags:
       - "v*"
 
@@ -16,6 +23,8 @@ jobs:
           python-version: "3.12"
       - shell: pwsh
         run: .\scripts\build-agent.ps1
+      - shell: pwsh
+        run: .\dist\comfycluster-agent.exe doctor --mock-gpus 2
       - uses: actions/upload-artifact@v4
         with:
           name: comfycluster-agent-windows-x64
