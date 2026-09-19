@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from comfycluster_common.models import HostView, JobSubmitRequest, WorkerSnapshot, WorkerState
 
+from .workflow import analyze_workflow, host_has_model
+
 
 @dataclass(slots=True)
 class Candidate:
@@ -21,6 +23,7 @@ class Scheduler:
         workers: list[tuple[HostView, WorkerSnapshot]],
     ) -> Candidate | None:
         candidates: list[Candidate] = []
+        requirements = analyze_workflow(request.workflow)
         for host, worker in workers:
             if not host.connected or worker.state is not WorkerState.IDLE:
                 continue
@@ -30,6 +33,8 @@ class Scheduler:
             if gpu is None:
                 continue
             if request.minimum_vram_mb and gpu.memory_total_mb < request.minimum_vram_mb:
+                continue
+            if any(not host_has_model(host, model_ref) for model_ref in requirements.model_refs):
                 continue
             candidates.append(Candidate(host=host, worker=worker, free_vram_mb=gpu.memory_free_mb))
 

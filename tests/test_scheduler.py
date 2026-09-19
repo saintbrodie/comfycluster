@@ -48,3 +48,30 @@ def test_scheduler_avoids_reserved_worker():
     host.workers = [worker]
     candidate = scheduler.choose(JobSubmitRequest(workflow={}), [(host, worker)])
     assert candidate is None
+
+
+def test_scheduler_requires_referenced_model():
+    scheduler = Scheduler()
+    host_a, worker_a = _host("a", "GPU-A", 32768, 0, WorkerState.IDLE)
+    host_b, worker_b = _host("b", "GPU-B", 32768, 0, WorkerState.IDLE)
+    from comfycluster_common.models import ModelInventoryItem
+
+    host_b.models = [
+        ModelInventoryItem(
+            category="checkpoints",
+            name="flux/flux1-dev.safetensors",
+            path="D:/models/flux/flux1-dev.safetensors",
+            size_bytes=1,
+        )
+    ]
+    request = JobSubmitRequest(
+        workflow={
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "flux/flux1-dev.safetensors"},
+            }
+        }
+    )
+    candidate = scheduler.choose(request, [(host_a, worker_a), (host_b, worker_b)])
+    assert candidate is not None
+    assert candidate.host.host_id == "b"
