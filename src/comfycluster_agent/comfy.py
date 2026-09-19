@@ -27,9 +27,37 @@ def _python_for_comfy(home: Path) -> Path:
         home.parent / "python_embeded" / "python.exe",
         home / "python_embeded" / "python.exe",
         home / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
+        home / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
         Path(sys.executable),
     ]
     return next((p for p in candidates if p.exists()), Path(sys.executable))
+
+
+def _stability_matrix_candidates() -> list[Path]:
+    roots: list[Path] = []
+    explicit = os.getenv("STABILITY_MATRIX_HOME")
+    if explicit:
+        roots.append(Path(explicit))
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        roots.append(Path(appdata) / "StabilityMatrix")
+
+    candidates: list[Path] = []
+    for root in roots:
+        for packages_dir in (root / "Packages", root / "Data" / "Packages"):
+            if not packages_dir.is_dir():
+                continue
+            direct = packages_dir / "ComfyUI"
+            if direct.is_dir():
+                candidates.append(direct)
+            try:
+                package_dirs = sorted(packages_dir.iterdir(), key=lambda item: item.name.casefold())
+            except OSError:
+                continue
+            for package in package_dirs:
+                if package.is_dir() and "comfy" in package.name.casefold():
+                    candidates.append(package)
+    return candidates
 
 
 def discover_comfy(explicit_home: Path | None = None) -> ComfyInstallation | None:
@@ -39,12 +67,14 @@ def discover_comfy(explicit_home: Path | None = None) -> ComfyInstallation | Non
     env_home = os.getenv("COMFYUI_HOME")
     if env_home:
         candidates.append(Path(env_home))
+
     cwd = Path.cwd()
     candidates.extend(
         [
             cwd,
             cwd / "ComfyUI",
             cwd.parent / "ComfyUI",
+            *_stability_matrix_candidates(),
             Path("C:/ComfyUI"),
             Path("C:/AI/ComfyUI"),
         ]
@@ -52,7 +82,10 @@ def discover_comfy(explicit_home: Path | None = None) -> ComfyInstallation | Non
 
     seen: set[Path] = set()
     for candidate in candidates:
-        candidate = candidate.expanduser().resolve()
+        try:
+            candidate = candidate.expanduser().resolve()
+        except OSError:
+            continue
         if candidate in seen:
             continue
         seen.add(candidate)

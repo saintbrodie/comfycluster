@@ -12,5 +12,5 @@ class AgentSettings(BaseSettings):
     comfy_home: Path | None = None
     base_port: int = 8188
     heartbeat_seconds: float = 5.0
-    autostart_workers: bool = False
+    autostart_workers: bool = True
     mock_gpus: int = 0
