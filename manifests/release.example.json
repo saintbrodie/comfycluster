@@ -1,0 +1,21 @@
+{
+  "name": "comfy-prod-001",
+  "comfy": {
+    "ref": "master",
+    "commit": null
+  },
+  "python": {
+    "version": "3.12"
+  },
+  "nodes": [
+    {
+      "name": "ComfyUI-Manager",
+      "repo": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
+      "commit": null
+    }
+  ],
+  "launch": {
+    "base_port": 8188,
+    "listen": "127.0.0.1"
+  }
+}
