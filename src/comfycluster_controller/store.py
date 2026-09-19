@@ -55,7 +55,16 @@ class FleetStore:
             host.last_seen = datetime.now(UTC)
             host.connected = True
             host.gpus = heartbeat.gpus
-            host.workers = heartbeat.workers
+            existing = {worker.worker_id: worker for worker in host.workers}
+            merged: list[WorkerSnapshot] = []
+            for incoming in heartbeat.workers:
+                previous = existing.get(incoming.worker_id)
+                if previous and previous.current_job_id and not incoming.current_job_id:
+                    incoming = incoming.model_copy(deep=True)
+                    incoming.current_job_id = previous.current_job_id
+                    incoming.state = WorkerState.BUSY
+                merged.append(incoming)
+            host.workers = merged
             return host.model_copy(deep=True)
 
     async def mark_disconnected(self, host_id: str) -> None:
@@ -82,6 +91,26 @@ class FleetStore:
                 for worker in host.workers:
                     result.append((host.model_copy(deep=True), worker.model_copy(deep=True)))
             return result
+
+    async def update_worker(
+        self,
+        host_id: str,
+        worker_id: str,
+        *,
+        state: WorkerState | None = None,
+        current_job_id: UUID | None = None,
+    ) -> WorkerSnapshot | None:
+        async with self._lock:
+            host = self._hosts.get(host_id)
+            if not host:
+                return None
+            worker = next((item for item in host.workers if item.worker_id == worker_id), None)
+            if not worker:
+                return None
+            if state is not None:
+                worker.state = state
+            worker.current_job_id = current_job_id
+            return worker.model_copy(deep=True)
 
     async def create_job(self, job: JobRecord) -> JobRecord:
         async with self._lock:

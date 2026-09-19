@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from comfycluster_common.models import AgentEvent, HostHeartbeat, HostRegistration, JobRecord, JobState, JobSubmitRequest
+from comfycluster_common.models import (
+    AgentEvent,
+    HostHeartbeat,
+    HostRegistration,
+    JobRecord,
+    JobState,
+    JobSubmitRequest,
+    WorkerState,
+)
 from comfycluster_common.protocol import parse_agent_message
 
 from .connections import AgentConnectionManager
@@ -21,6 +30,60 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
     app.state.store = store or FleetStore()
     app.state.connections = connections or AgentConnectionManager()
     app.state.scheduler = Scheduler()
+    app.state.dispatch_lock = asyncio.Lock()
+
+    async def dispatch_job(job: JobRecord):
+        async with app.state.dispatch_lock:
+            fresh_job = await app.state.store.get_job(job.job_id)
+            if fresh_job is None or fresh_job.state is not JobState.QUEUED:
+                return fresh_job
+            candidate = app.state.scheduler.choose(
+                fresh_job.request, await app.state.store.list_workers()
+            )
+            if candidate is None:
+                return fresh_job
+
+            await app.state.store.update_worker(
+                candidate.host.host_id,
+                candidate.worker.worker_id,
+                state=WorkerState.BUSY,
+                current_job_id=fresh_job.job_id,
+            )
+            await app.state.store.set_job_state(
+                fresh_job.job_id,
+                JobState.DISPATCHING,
+                assigned_host_id=candidate.host.host_id,
+                assigned_worker_id=candidate.worker.worker_id,
+                error=None,
+            )
+            try:
+                await app.state.connections.send(
+                    candidate.host.host_id,
+                    "job.submit",
+                    {
+                        "job_id": str(fresh_job.job_id),
+                        "worker_id": candidate.worker.worker_id,
+                        "workflow": fresh_job.request.workflow,
+                        "client_id": fresh_job.request.client_id,
+                    },
+                )
+            except KeyError as exc:
+                await app.state.store.update_worker(
+                    candidate.host.host_id,
+                    candidate.worker.worker_id,
+                    state=WorkerState.IDLE,
+                    current_job_id=None,
+                )
+                return await app.state.store.set_job_state(
+                    fresh_job.job_id, JobState.QUEUED, error=str(exc)
+                )
+            return await app.state.store.get_job(fresh_job.job_id)
+
+    async def dispatch_queued_jobs() -> None:
+        jobs = await app.state.store.list_jobs()
+        for queued in reversed(jobs):
+            if queued.state is JobState.QUEUED:
+                await dispatch_job(queued)
 
     @app.get("/")
     async def dashboard() -> FileResponse:
@@ -68,30 +131,7 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
     @app.post("/api/v1/jobs", status_code=202)
     async def submit_job(request: JobSubmitRequest):
         job = await app.state.store.create_job(JobRecord(request=request))
-        candidate = app.state.scheduler.choose(request, await app.state.store.list_workers())
-        if candidate is None:
-            return job
-
-        await app.state.store.set_job_state(
-            job.job_id,
-            JobState.DISPATCHING,
-            assigned_host_id=candidate.host.host_id,
-            assigned_worker_id=candidate.worker.worker_id,
-        )
-        try:
-            await app.state.connections.send(
-                candidate.host.host_id,
-                "job.submit",
-                {
-                    "job_id": str(job.job_id),
-                    "worker_id": candidate.worker.worker_id,
-                    "workflow": request.workflow,
-                    "client_id": request.client_id,
-                },
-            )
-        except KeyError as exc:
-            return await app.state.store.set_job_state(job.job_id, JobState.QUEUED, error=str(exc))
-        return await app.state.store.get_job(job.job_id)
+        return await dispatch_job(job)
 
     @app.websocket("/api/v1/agents/ws")
     async def agent_socket(websocket: WebSocket):
@@ -111,6 +151,7 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
                 message = parse_agent_message(await websocket.receive_text())
                 if isinstance(message, HostHeartbeat):
                     await app.state.store.heartbeat(message)
+                    await dispatch_queued_jobs()
                 elif isinstance(message, HostRegistration):
                     await app.state.store.register_host(message)
                 elif isinstance(message, AgentEvent):
@@ -122,17 +163,33 @@ def create_app(store: FleetStore | None = None, connections: AgentConnectionMana
                             error=None,
                         )
                     elif message.event == "job.completed" and message.job_id:
-                        await app.state.store.set_job_state(
+                        finished = await app.state.store.set_job_state(
                             message.job_id,
                             JobState.SUCCEEDED,
                             error=None,
                         )
+                        if finished and finished.assigned_host_id and finished.assigned_worker_id:
+                            await app.state.store.update_worker(
+                                finished.assigned_host_id,
+                                finished.assigned_worker_id,
+                                state=WorkerState.IDLE,
+                                current_job_id=None,
+                            )
+                        await dispatch_queued_jobs()
                     elif message.event == "job.failed" and message.job_id:
-                        await app.state.store.set_job_state(
+                        failed = await app.state.store.set_job_state(
                             message.job_id,
                             JobState.FAILED,
                             error=message.payload.get("error", "worker reported failure"),
                         )
+                        if failed and failed.assigned_host_id and failed.assigned_worker_id:
+                            await app.state.store.update_worker(
+                                failed.assigned_host_id,
+                                failed.assigned_worker_id,
+                                state=WorkerState.IDLE,
+                                current_job_id=None,
+                            )
+                        await dispatch_queued_jobs()
         except WebSocketDisconnect:
             pass
         finally:

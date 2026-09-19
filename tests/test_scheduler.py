@@ -39,3 +39,12 @@ def test_scheduler_honors_minimum_vram():
     workers = [_host("a", "GPU-A", 16384, 0, WorkerState.IDLE)]
     candidate = scheduler.choose(JobSubmitRequest(workflow={}, minimum_vram_mb=24000), workers)
     assert candidate is None
+
+
+def test_scheduler_avoids_reserved_worker():
+    scheduler = Scheduler()
+    host, worker = _host("a", "GPU-A", 32768, 0, WorkerState.BUSY)
+    worker.current_job_id = __import__("uuid").uuid4()
+    host.workers = [worker]
+    candidate = scheduler.choose(JobSubmitRequest(workflow={}), [(host, worker)])
+    assert candidate is None
