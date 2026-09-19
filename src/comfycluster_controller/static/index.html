@@ -16,14 +16,16 @@
     .metric .value { font-size:28px; font-weight:700; margin-top:4px; }
     .muted { color:#9298a1; }
     .host { margin:12px 0; overflow:hidden; }
-    .hosthead { padding:14px 16px; display:flex; justify-content:space-between; border-bottom:1px solid #292c31; }
+    .hosthead { padding:14px 16px; display:flex; justify-content:space-between; border-bottom:1px solid #292c31; gap:16px; align-items:center; }
+    .hostmeta { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
     .gpu { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:12px; padding:13px 16px; border-top:1px solid #22252a; align-items:center; }
     .gpu:first-child { border-top:0; }
     .pill { padding:4px 9px; border-radius:999px; background:#272b31; width:max-content; font-size:12px; text-transform:uppercase; }
     .idle { background:#173b2d; color:#82e8b6; } .busy { background:#493914; color:#ffd46e; } .offline,.error { background:#481f24; color:#ff9ca7; }
+    .tooling { background:#202830; color:#bcd8f4; }
     button { border:1px solid #3a3f47; background:#23262c; color:#eee; border-radius:7px; padding:8px 11px; cursor:pointer; }
     button:hover { background:#2b3037; }
-    @media (max-width:800px){.metrics{grid-template-columns:1fr 1fr}.gpu{grid-template-columns:1fr 1fr}}
+    @media (max-width:800px){.metrics{grid-template-columns:1fr 1fr}.gpu{grid-template-columns:1fr 1fr}.hosthead{align-items:flex-start;flex-direction:column}.hostmeta{justify-content:flex-start}}
   </style>
 </head>
 <body>
@@ -42,12 +44,13 @@ async function fetchHosts(){ const r=await fetch('/api/v1/hosts'); return r.json
 async function command(host, action, payload={}){ await fetch(`/api/v1/hosts/${host}/commands/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}); setTimeout(refresh,400); }
 async function fleet(action){ const hosts=await fetchHosts(); await Promise.all(hosts.filter(h=>h.connected).map(h=>command(h.host_id,action))); }
 function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+function cliBadge(h){ const cli=h.comfy_cli||{}; if(!cli.available) return '<span class="pill offline">CLI unavailable</span>'; if(cli.error) return `<span class="pill error" title="${esc(cli.error)}">CLI error</span>`; return `<span class="pill tooling">CLI ${esc(cli.version||'detected')}</span>`; }
 async function refresh(){
   try{
     const hosts=await fetchHosts(); let gpus=0,idle=0,busy=0;
     for(const h of hosts){gpus+=h.gpus.length; idle+=h.workers.filter(w=>w.state==='idle').length; busy+=h.workers.filter(w=>w.state==='busy').length;}
     document.getElementById('hostsCount').textContent=hosts.length; document.getElementById('gpuCount').textContent=gpus; document.getElementById('idleCount').textContent=idle; document.getElementById('busyCount').textContent=busy;
-    document.getElementById('hosts').innerHTML=hosts.map(h=>`<div class="host"><div class="hosthead"><div><strong>${esc(h.hostname)}</strong> <span class="muted">${esc(h.os_name)}</span></div><div class="pill ${h.connected?'idle':'offline'}">${h.connected?'connected':'offline'}</div></div><div>${h.workers.map(w=>{const g=h.gpus.find(x=>x.uuid===w.gpu_uuid)||{};return `<div class="gpu"><div><strong>${esc(g.name||w.worker_id)}</strong><div class="muted">GPU ${w.gpu_index} · :${w.port}</div></div><div><span class="pill ${esc(w.state)}">${esc(w.state)}</span></div><div>${esc(g.memory_used_mb||0)} / ${esc(g.memory_total_mb||0)} MB</div><div><button onclick="command('${esc(h.host_id)}','worker.start',{worker_id:'${esc(w.worker_id)}'})">Start</button> <button onclick="command('${esc(h.host_id)}','worker.restart',{worker_id:'${esc(w.worker_id)}'})">Restart</button> <button onclick="command('${esc(h.host_id)}','worker.stop',{worker_id:'${esc(w.worker_id)}'})">Stop</button></div></div>`}).join('')}</div></div>`).join('') || '<p class="muted">No agents connected yet.</p>';
+    document.getElementById('hosts').innerHTML=hosts.map(h=>`<div class="host"><div class="hosthead"><div><strong>${esc(h.hostname)}</strong> <span class="muted">${esc(h.os_name)}</span><div class="muted">${h.nodes.length} custom node packages · ${h.models.length} model files</div></div><div class="hostmeta">${cliBadge(h)}<span class="pill ${h.connected?'idle':'offline'}">${h.connected?'connected':'offline'}</span></div></div><div>${h.workers.map(w=>{const g=h.gpus.find(x=>x.uuid===w.gpu_uuid)||{};return `<div class="gpu"><div><strong>${esc(g.name||w.worker_id)}</strong><div class="muted">GPU ${w.gpu_index} · :${w.port} · ${w.node_types?.length||0} registered node types</div></div><div><span class="pill ${esc(w.state)}">${esc(w.state)}</span></div><div>${esc(g.memory_used_mb||0)} / ${esc(g.memory_total_mb||0)} MB</div><div><button onclick="command('${esc(h.host_id)}','worker.start',{worker_id:'${esc(w.worker_id)}'})">Start</button> <button onclick="command('${esc(h.host_id)}','worker.restart',{worker_id:'${esc(w.worker_id)}'})">Restart</button> <button onclick="command('${esc(h.host_id)}','worker.stop',{worker_id:'${esc(w.worker_id)}'})">Stop</button></div></div>`}).join('')}</div></div>`).join('') || '<p class="muted">No agents connected yet.</p>';
   }catch(e){ console.error(e); }
 }
 refresh(); setInterval(refresh,3000);

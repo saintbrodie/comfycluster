@@ -13,6 +13,7 @@ from comfycluster_common.models import AgentEvent, HostHeartbeat, HostRegistrati
 from comfycluster_common.protocol import parse_controller_command
 
 from .comfy import discover_comfy
+from .comfy_cli import ComfyCliAdapter
 from .gpu import discover_gpus
 from .inventory import scan_custom_nodes, scan_models
 from .runtime import NativeWindowsRuntime
@@ -30,6 +31,9 @@ class AgentClient:
         self.runtime = NativeWindowsRuntime(self.comfy, self.gpus, settings.base_port)
         self.nodes = scan_custom_nodes(Path(self.comfy.path)) if self.comfy else []
         self.models = scan_models(Path(self.comfy.path)) if self.comfy else []
+        cli_workspace = Path(self.comfy.path) if self.comfy else Path.cwd()
+        self.comfy_cli_adapter = ComfyCliAdapter(cli_workspace, settings.comfy_cli_executable)
+        self.comfy_cli = self.comfy_cli_adapter.discover_info()
 
     @staticmethod
     def _host_id() -> str:
@@ -44,6 +48,7 @@ class AgentClient:
             agent_version=AGENT_VERSION,
             gpus=self.gpus,
             comfy=self.comfy,
+            comfy_cli=self.comfy_cli,
             workers=self.runtime.snapshots(),
             nodes=self.nodes,
             models=self.models,
@@ -184,5 +189,10 @@ class AgentClient:
             self.comfy = discover_comfy(self.settings.comfy_home)
             self.nodes = scan_custom_nodes(Path(self.comfy.path)) if self.comfy else []
             self.models = scan_models(Path(self.comfy.path)) if self.comfy else []
+            cli_workspace = Path(self.comfy.path) if self.comfy else Path.cwd()
+            self.comfy_cli_adapter = ComfyCliAdapter(
+                cli_workspace, self.settings.comfy_cli_executable
+            )
+            self.comfy_cli = self.comfy_cli_adapter.discover_info()
             return self.registration().model_dump(mode="json")
         raise ValueError(f"unknown action: {action}")

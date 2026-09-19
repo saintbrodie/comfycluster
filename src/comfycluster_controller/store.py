@@ -40,6 +40,7 @@ class FleetStore:
                 last_seen=datetime.now(UTC),
                 gpus=registration.gpus,
                 comfy=registration.comfy,
+                comfy_cli=registration.comfy_cli,
                 workers=registration.workers,
                 nodes=registration.nodes,
                 models=registration.models,

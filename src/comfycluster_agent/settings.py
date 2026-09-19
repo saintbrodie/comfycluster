@@ -10,6 +10,7 @@ class AgentSettings(BaseSettings):
 
     controller_url: str = "ws://127.0.0.1:9320/api/v1/agents/ws"
     comfy_home: Path | None = None
+    comfy_cli_executable: str = "comfy"
     base_port: int = 8188
     heartbeat_seconds: float = 5.0
     autostart_workers: bool = True

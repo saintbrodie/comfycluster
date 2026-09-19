@@ -54,6 +54,15 @@ class ComfyInstallation(BaseModel):
     git_commit: str | None = None
 
 
+class ComfyCliInfo(BaseModel):
+    available: bool = False
+    version: str | None = None
+    output_contract: dict[str, str] = Field(default_factory=dict)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    management_features: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class NodeInventoryItem(BaseModel):
     name: str
     path: str
@@ -78,9 +87,6 @@ class WorkerSnapshot(BaseModel):
     comfy_url: str | None = None
     current_job_id: UUID | None = None
     error: str | None = None
-    # Populated from ComfyUI /object_info once a worker is ready. This gives
-    # the scheduler a runtime-truth capability set rather than guessing which
-    # Python package provides a workflow node.
     node_types: list[str] = Field(default_factory=list)
 
 
@@ -93,6 +99,7 @@ class HostRegistration(BaseModel):
     agent_version: str
     gpus: list[GPUInfo]
     comfy: ComfyInstallation | None = None
+    comfy_cli: ComfyCliInfo = Field(default_factory=ComfyCliInfo)
     workers: list[WorkerSnapshot] = Field(default_factory=list)
     nodes: list[NodeInventoryItem] = Field(default_factory=list)
     models: list[ModelInventoryItem] = Field(default_factory=list)
@@ -133,6 +140,7 @@ class HostView(BaseModel):
     last_seen: datetime = Field(default_factory=utcnow)
     gpus: list[GPUInfo] = Field(default_factory=list)
     comfy: ComfyInstallation | None = None
+    comfy_cli: ComfyCliInfo = Field(default_factory=ComfyCliInfo)
     workers: list[WorkerSnapshot] = Field(default_factory=list)
     nodes: list[NodeInventoryItem] = Field(default_factory=list)
     models: list[ModelInventoryItem] = Field(default_factory=list)
