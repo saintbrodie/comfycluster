@@ -15,6 +15,7 @@ from comfycluster_common.models import (
     JobState,
     JobSubmitRequest,
     WorkerState,
+    utcnow,
 )
 from comfycluster_common.protocol import parse_agent_message
 from comfycluster_common.releases import ReleaseManifest
@@ -88,6 +89,10 @@ def create_app(
             if candidate is None:
                 return fresh_job
 
+            gpu = next(
+                (item for item in candidate.host.gpus if item.uuid == candidate.worker.gpu_uuid),
+                None,
+            )
             await app.state.store.update_worker(
                 candidate.host.host_id,
                 candidate.worker.worker_id,
@@ -99,6 +104,9 @@ def create_app(
                 JobState.DISPATCHING,
                 assigned_host_id=candidate.host.host_id,
                 assigned_worker_id=candidate.worker.worker_id,
+                assigned_gpu_uuid=candidate.worker.gpu_uuid,
+                assigned_gpu_name=gpu.name if gpu else None,
+                assigned_gpu_memory_mb=gpu.memory_total_mb if gpu else None,
                 error=None,
             )
             try:
@@ -233,6 +241,37 @@ def create_app(
     @app.get("/api/v1/admin/jobs")
     async def admin_job_summaries(_: Principal = Depends(require_admin)):
         return await app.state.store.list_job_summaries()
+
+    @app.get("/api/v1/admin/usage")
+    async def admin_usage(_: Principal = Depends(require_admin)):
+        summaries = await app.state.store.list_job_summaries()
+        groups: dict[str, dict] = {}
+        users: dict[str, dict] = {}
+        total_seconds = 0.0
+        for job in summaries:
+            seconds = float(job.runtime_seconds or 0.0)
+            if seconds <= 0:
+                continue
+            total_seconds += seconds
+            group_key = job.group_id or "unassigned"
+            user_key = job.owner_user_id or "legacy"
+            group = groups.setdefault(
+                group_key,
+                {"group_id": group_key, "gpu_seconds": 0.0, "completed_jobs": 0},
+            )
+            user = users.setdefault(
+                user_key,
+                {"user_id": user_key, "gpu_seconds": 0.0, "completed_jobs": 0},
+            )
+            group["gpu_seconds"] += seconds
+            group["completed_jobs"] += 1
+            user["gpu_seconds"] += seconds
+            user["completed_jobs"] += 1
+        return {
+            "gpu_seconds": total_seconds,
+            "groups": sorted(groups.values(), key=lambda item: item["gpu_seconds"], reverse=True),
+            "users": sorted(users.values(), key=lambda item: item["gpu_seconds"], reverse=True),
+        }
 
     @app.get("/api/v1/hosts")
     async def hosts(_: Principal = Depends(current_principal)):
@@ -384,15 +423,16 @@ def create_app(
                 user.max_submissions_per_minute,
             )
             if not allowed:
+                retry_seconds = max(1, int(retry_after) + 1)
                 raise HTTPException(
                     status_code=429,
                     detail={
                         "error": "submission_rate_limit_reached",
                         "limit": user.max_submissions_per_minute,
                         "current": current,
-                        "retry_after_seconds": max(1, int(retry_after) + 1),
+                        "retry_after_seconds": retry_seconds,
                     },
-                    headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+                    headers={"Retry-After": str(retry_seconds)},
                 )
 
         request = request.model_copy(update={"group_id": group_id})
@@ -435,9 +475,13 @@ def create_app(
         if job.state in {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}:
             return job
         if job.state is JobState.QUEUED:
-            return await app.state.store.set_job_state(job_id, JobState.CANCELED)
+            return await app.state.store.set_job_state(
+                job_id, JobState.CANCELED, completed_at=utcnow()
+            )
         if not job.assigned_host_id or not job.assigned_worker_id:
-            return await app.state.store.set_job_state(job_id, JobState.CANCELED)
+            return await app.state.store.set_job_state(
+                job_id, JobState.CANCELED, completed_at=utcnow()
+            )
         try:
             await app.state.connections.send(
                 job.assigned_host_id,
@@ -483,12 +527,14 @@ def create_app(
                             message.job_id,
                             JobState.RUNNING,
                             comfy_prompt_id=message.payload.get("prompt_id"),
+                            started_at=message.sent_at,
                             error=None,
                         )
                     elif message.event == "job.completed" and message.job_id:
                         finished = await app.state.store.set_job_state(
                             message.job_id,
                             JobState.SUCCEEDED,
+                            completed_at=message.sent_at,
                             error=None,
                             outputs=message.payload.get("outputs", {}),
                         )
@@ -504,6 +550,7 @@ def create_app(
                         canceled = await app.state.store.set_job_state(
                             message.job_id,
                             JobState.CANCELED,
+                            completed_at=message.sent_at,
                             error=None,
                         )
                         if canceled and canceled.assigned_host_id and canceled.assigned_worker_id:
@@ -523,6 +570,7 @@ def create_app(
                         failed = await app.state.store.set_job_state(
                             message.job_id,
                             JobState.FAILED,
+                            completed_at=message.sent_at,
                             error=message.payload.get("error", "worker reported failure"),
                         )
                         if failed and failed.assigned_host_id and failed.assigned_worker_id:
