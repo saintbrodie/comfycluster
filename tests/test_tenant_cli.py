@@ -53,3 +53,41 @@ def test_issue_user_token_cli_rejects_unknown_user(monkeypatch, tmp_path):
 
     result = runner.invoke(app, ["issue-user-token", "--user-id", "missing"])
     assert result.exit_code != 0
+
+
+def test_face_grouping_policy_cli_is_durable(monkeypatch, tmp_path):
+    database = tmp_path / "fleet.db"
+    monkeypatch.setenv("COMFYCLUSTER_DATABASE_PATH", str(database))
+
+    bootstrap = runner.invoke(
+        app,
+        [
+            "bootstrap-user",
+            "--user-id",
+            "alice",
+            "--display-name",
+            "Alice",
+            "--group-id",
+            "creative",
+        ],
+    )
+    assert bootstrap.exit_code == 0, bootstrap.output
+
+    enabled = runner.invoke(app, ["set-face-grouping", "--group-id", "creative", "--enabled"])
+    assert enabled.exit_code == 0, enabled.output
+    assert "face grouping enabled" in enabled.output
+
+    async def verify(expected: bool):
+        store = SQLiteFleetStore(database)
+        try:
+            group = await store.get_group("creative")
+            assert group is not None
+            assert group.policy.face_grouping_enabled is expected
+        finally:
+            store.close()
+
+    asyncio.run(verify(True))
+
+    disabled = runner.invoke(app, ["set-face-grouping", "--group-id", "creative", "--disabled"])
+    assert disabled.exit_code == 0, disabled.output
+    asyncio.run(verify(False))
