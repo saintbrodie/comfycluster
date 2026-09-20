@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -88,6 +90,25 @@ class DesktopApi:
             if exc.response.status_code == 404:
                 return None
             raise
+
+    def download_asset(self, asset_id: str, filename: str) -> Path:
+        cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "assets"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = Path(filename).name or "output.bin"
+        destination = cache_dir / f"{asset_id}_{safe_name}"
+        headers = self._controller_headers()
+        timeout = httpx.Timeout(connect=20.0, read=300.0, write=30.0, pool=20.0)
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream(
+                "GET",
+                f"{self.controller_base}/api/v1/assets/{asset_id}/content",
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        handle.write(chunk)
+        return destination
 
     def snapshot(self) -> dict:
         snapshot = {
