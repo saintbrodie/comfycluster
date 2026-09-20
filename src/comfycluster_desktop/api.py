@@ -123,6 +123,8 @@ class DesktopApi:
         cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "thumbnails"
         cache_dir.mkdir(parents=True, exist_ok=True)
         destination = cache_dir / f"{asset_id}-{size}.jpg"
+        if destination.is_file():
+            return destination
         headers = self._controller_headers()
         with httpx.Client(timeout=30.0) as client:
             response = client.get(
