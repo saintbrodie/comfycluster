@@ -260,6 +260,9 @@ def register_asset_routes(
             raise HTTPException(status_code=404, detail="job not found")
         if host_id and job.assigned_host_id and host_id != job.assigned_host_id:
             raise HTTPException(status_code=403, detail="job is assigned to another host")
+        group = await store.get_group(record.group_id) if record.group_id else None
+        if group is None or not group.policy.face_grouping_enabled:
+            raise HTTPException(status_code=409, detail="face grouping is disabled for this group")
         if any(not _FACE_CLUSTER_ID.fullmatch(value) for value in update.face_cluster_ids):
             raise HTTPException(status_code=400, detail="face cluster IDs must be opaque hashes")
         metadata = record.metadata.model_copy(
