@@ -4,7 +4,7 @@ import queue
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThread, QUrl, Signal, Qt
+from PySide6.QtCore import QThread, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -88,6 +88,39 @@ class PreviewAssetWorker(QThread):
         try:
             path = self.api.download_preview(self.asset_id)
             self.ready.emit(str(path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class GalleryQueryWorker(QThread):
+    ready = Signal(object, int)
+    failed = Signal(str, int)
+
+    def __init__(self, api: DesktopApi, filters: dict[str, Any], generation: int) -> None:
+        super().__init__()
+        self.api = api
+        self.filters = filters
+        self.generation = generation
+
+    def run(self) -> None:
+        try:
+            self.ready.emit(self.api.query_asset_page(**self.filters), self.generation)
+        except Exception as exc:
+            self.failed.emit(str(exc), self.generation)
+
+
+class AssetDetailWorker(QThread):
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, api: DesktopApi, asset_id: str) -> None:
+        super().__init__()
+        self.api = api
+        self.asset_id = asset_id
+
+    def run(self) -> None:
+        try:
+            self.ready.emit(self.api.asset_detail(self.asset_id))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -191,14 +224,29 @@ class GalleryCard(QFrame):
 
 
 class GalleryPage(QWidget):
+    PAGE_SIZE = 60
+
     def __init__(self, api: DesktopApi) -> None:
         super().__init__()
         self.api = api
         self.assets: list[dict[str, Any]] = []
         self.facets: dict[str, list[str]] = {}
+        self.page: dict[str, Any] = {
+            "items": [],
+            "total": 0,
+            "offset": 0,
+            "limit": self.PAGE_SIZE,
+            "has_more": False,
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
         self.thumbnail_labels: dict[str, QLabel] = {}
         self.open_workers: set[OpenAssetWorker] = set()
         self.preview_workers: set[PreviewAssetWorker] = set()
+        self.query_workers: set[GalleryQueryWorker] = set()
+        self.detail_workers: set[AssetDetailWorker] = set()
+        self.generation = 0
+        self.initialized = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 24, 26, 24)
@@ -207,7 +255,7 @@ class GalleryPage(QWidget):
         title.setObjectName("title")
         root.addWidget(title)
         subtitle = QLabel(
-            "Private media library with Comfy provenance, model metadata, video previews, advanced filtering, and anonymous face groups."
+            "Private paginated media library with Comfy provenance, model metadata, video previews, advanced filtering, and anonymous face groups."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -215,8 +263,12 @@ class GalleryPage(QWidget):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search filenames, prompts, workflows, models, LoRAs, codecs, tags…")
-        self.search.textChanged.connect(self.render)
         root.addWidget(self.search)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300)
+        self.search_timer.timeout.connect(lambda: self.refresh_page(reset=True))
+        self.search.textChanged.connect(lambda _text: self.search_timer.start())
 
         filters = QHBoxLayout()
         self.model_filter = self._combo("All models")
@@ -235,16 +287,39 @@ class GalleryPage(QWidget):
             self.group_filter,
             self.face_filter,
         ):
-            combo.currentIndexChanged.connect(self.render)
+            combo.currentIndexChanged.connect(lambda _index: self.refresh_page(reset=True))
             filters.addWidget(combo)
         clear = QPushButton("Clear")
         clear.clicked.connect(self.clear_filters)
         filters.addWidget(clear)
         root.addLayout(filters)
 
+        navigation = QHBoxLayout()
         self.count_label = QLabel("0 outputs")
         self.count_label.setObjectName("muted")
-        root.addWidget(self.count_label)
+        navigation.addWidget(self.count_label)
+        navigation.addStretch(1)
+
+        self.sort_filter = QComboBox()
+        self.sort_filter.addItem("Newest", ("created_at", "desc"))
+        self.sort_filter.addItem("Oldest", ("created_at", "asc"))
+        self.sort_filter.addItem("Largest", ("size_bytes", "desc"))
+        self.sort_filter.addItem("Smallest", ("size_bytes", "asc"))
+        self.sort_filter.addItem("Longest video", ("duration_seconds", "desc"))
+        self.sort_filter.addItem("Filename A–Z", ("filename", "asc"))
+        self.sort_filter.currentIndexChanged.connect(lambda _index: self.refresh_page(reset=True))
+        navigation.addWidget(self.sort_filter)
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(lambda: self.refresh_page(reset=False))
+        navigation.addWidget(refresh_button)
+        self.previous_button = QPushButton("Previous")
+        self.previous_button.clicked.connect(self.previous_page)
+        navigation.addWidget(self.previous_button)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self.next_page)
+        navigation.addWidget(self.next_button)
+        root.addLayout(navigation)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -258,6 +333,7 @@ class GalleryPage(QWidget):
         self.thumbnail_worker = ThumbnailWorker(api)
         self.thumbnail_worker.ready.connect(self._thumbnail_ready)
         self.thumbnail_worker.start()
+        self._update_navigation()
 
     @staticmethod
     def _combo(default: str) -> QComboBox:
@@ -279,7 +355,6 @@ class GalleryPage(QWidget):
         combo.blockSignals(False)
 
     def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
-        self.assets = list(snapshot.get("assets") or [])
         self.facets = snapshot.get("asset_facets") or {}
         models = sorted(
             set((self.facets.get("models") or []) + (self.facets.get("model_refs") or [])),
@@ -292,10 +367,23 @@ class GalleryPage(QWidget):
         self._set_combo(self.codec_filter, "All video codecs", self.facets.get("video_codecs") or [])
         self._set_combo(self.group_filter, "All groups", self.facets.get("groups") or [])
         self._set_combo(self.face_filter, "All face groups", self.facets.get("face_clusters") or [])
-        self.render()
+        if not self.initialized:
+            page = snapshot.get("asset_page") or {
+                "items": snapshot.get("assets") or [],
+                "total": len(snapshot.get("assets") or []),
+                "offset": 0,
+                "limit": self.PAGE_SIZE,
+                "has_more": False,
+                "sort_by": "created_at",
+                "sort_order": "desc",
+            }
+            self._apply_page(page)
+            self.initialized = True
 
     def clear_filters(self) -> None:
+        self.search.blockSignals(True)
         self.search.clear()
+        self.search.blockSignals(False)
         for combo in (
             self.model_filter,
             self.lora_filter,
@@ -305,49 +393,95 @@ class GalleryPage(QWidget):
             self.group_filter,
             self.face_filter,
         ):
+            combo.blockSignals(True)
             combo.setCurrentIndex(0)
-        self.render()
+            combo.blockSignals(False)
+        self.sort_filter.blockSignals(True)
+        self.sort_filter.setCurrentIndex(0)
+        self.sort_filter.blockSignals(False)
+        self.refresh_page(reset=True)
 
-    def _matches(self, asset: dict[str, Any]) -> bool:
-        metadata = asset.get("metadata") or {}
-        model = self.model_filter.currentData()
-        lora = self.lora_filter.currentData()
-        sampler = self.sampler_filter.currentData()
-        media = self.media_filter.currentData()
-        codec = self.codec_filter.currentData()
-        group = self.group_filter.currentData()
-        face = self.face_filter.currentData()
-        if model and model not in (metadata.get("models") or []) + (metadata.get("model_refs") or []):
-            return False
-        if lora and lora not in (metadata.get("loras") or []):
-            return False
-        if sampler and sampler not in (metadata.get("samplers") or []):
-            return False
-        if media and not str(asset.get("media_type") or "").startswith(str(media) + "/"):
-            return False
-        if codec and str(metadata.get("video_codec") or "").casefold() != str(codec).casefold():
-            return False
-        if group and asset.get("group_id") != group:
-            return False
-        if face and face not in (metadata.get("face_cluster_ids") or []):
-            return False
-        q = self.search.text().strip().casefold()
-        if q:
-            searchable = [
-                str(asset.get("filename") or ""),
-                str(metadata.get("workflow_name") or ""),
-                *(str(value) for value in metadata.get("tags") or []),
-                *(str(value) for value in metadata.get("models") or []),
-                *(str(value) for value in metadata.get("model_refs") or []),
-                *(str(value) for value in metadata.get("loras") or []),
-                *(str(value) for value in metadata.get("prompts") or []),
-                str(metadata.get("video_codec") or ""),
-                str(metadata.get("audio_codec") or ""),
-                str(metadata.get("container_format") or ""),
-            ]
-            if not any(q in value.casefold() for value in searchable):
-                return False
-        return True
+    def _query_filters(self, offset: int | None = None) -> dict[str, Any]:
+        sort_by, sort_order = self.sort_filter.currentData() or ("created_at", "desc")
+        return {
+            "q": self.search.text().strip() or None,
+            "model": self.model_filter.currentData(),
+            "lora": self.lora_filter.currentData(),
+            "sampler": self.sampler_filter.currentData(),
+            "media_family": self.media_filter.currentData(),
+            "video_codec": self.codec_filter.currentData(),
+            "group_id": self.group_filter.currentData(),
+            "face_cluster_id": self.face_filter.currentData(),
+            "offset": self.page.get("offset", 0) if offset is None else offset,
+            "limit": self.PAGE_SIZE,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        }
+
+    def refresh_page(self, *, reset: bool) -> None:
+        offset = 0 if reset else int(self.page.get("offset") or 0)
+        self.generation += 1
+        generation = self.generation
+        self.count_label.setText("Searching…")
+        worker = GalleryQueryWorker(self.api, self._query_filters(offset), generation)
+        self.query_workers.add(worker)
+        worker.ready.connect(self._query_ready)
+        worker.failed.connect(self._query_failed)
+        worker.finished.connect(lambda w=worker: self._cleanup_query_worker(w))
+        worker.start()
+
+    def _query_ready(self, page: dict[str, Any], generation: int) -> None:
+        if generation != self.generation:
+            return
+        self._apply_page(page)
+
+    def _query_failed(self, message: str, generation: int) -> None:
+        if generation != self.generation:
+            return
+        self.count_label.setText("Gallery query failed")
+        QMessageBox.warning(self, "ComfyCluster gallery", message)
+
+    def _cleanup_query_worker(self, worker: GalleryQueryWorker) -> None:
+        self.query_workers.discard(worker)
+        worker.deleteLater()
+
+    def previous_page(self) -> None:
+        offset = max(0, int(self.page.get("offset") or 0) - self.PAGE_SIZE)
+        self._query_offset(offset)
+
+    def next_page(self) -> None:
+        if not self.page.get("has_more"):
+            return
+        offset = int(self.page.get("offset") or 0) + int(self.page.get("limit") or self.PAGE_SIZE)
+        self._query_offset(offset)
+
+    def _query_offset(self, offset: int) -> None:
+        self.generation += 1
+        generation = self.generation
+        self.count_label.setText("Loading page…")
+        worker = GalleryQueryWorker(self.api, self._query_filters(offset), generation)
+        self.query_workers.add(worker)
+        worker.ready.connect(self._query_ready)
+        worker.failed.connect(self._query_failed)
+        worker.finished.connect(lambda w=worker: self._cleanup_query_worker(w))
+        worker.start()
+
+    def _apply_page(self, page: dict[str, Any]) -> None:
+        self.page = page
+        self.assets = list(page.get("items") or [])
+        self.render()
+        self._update_navigation()
+
+    def _update_navigation(self) -> None:
+        total = int(self.page.get("total") or 0)
+        offset = int(self.page.get("offset") or 0)
+        count = len(self.assets)
+        if total and count:
+            self.count_label.setText(f"Showing {offset + 1:,}–{offset + count:,} of {total:,} outputs")
+        else:
+            self.count_label.setText("0 outputs")
+        self.previous_button.setEnabled(offset > 0)
+        self.next_button.setEnabled(bool(self.page.get("has_more")))
 
     def _clear_grid(self) -> None:
         while self.grid.count():
@@ -358,15 +492,13 @@ class GalleryPage(QWidget):
 
     def render(self) -> None:
         self._clear_grid()
-        filtered = [asset for asset in self.assets if self._matches(asset)][:300]
-        self.count_label.setText(f"{len(filtered)} output{'s' if len(filtered) != 1 else ''}")
-        if not filtered:
+        if not self.assets:
             empty = QLabel("No authorized outputs match these filters.")
             empty.setObjectName("muted")
             self.grid.addWidget(empty, 0, 0)
             return
         columns = 3
-        for index, asset in enumerate(filtered):
+        for index, asset in enumerate(self.assets):
             card = GalleryCard(asset, self.open_asset, self.preview_asset, self.show_details)
             row, column = divmod(index, columns)
             self.grid.addWidget(card, row, column)
@@ -375,7 +507,7 @@ class GalleryPage(QWidget):
             if media_type.startswith("image/") or media_type.startswith("video/"):
                 self.thumbnail_labels[asset_id] = card.preview
                 self.thumbnail_worker.enqueue(asset_id)
-        self.grid.setRowStretch((len(filtered) + columns - 1) // columns, 1)
+        self.grid.setRowStretch((len(self.assets) + columns - 1) // columns, 1)
 
     def _thumbnail_ready(self, asset_id: str, path: str) -> None:
         label = self.thumbnail_labels.get(asset_id)
@@ -417,15 +549,18 @@ class GalleryPage(QWidget):
         worker.finished.connect(lambda w=worker: self._cleanup_preview_worker(w))
         worker.start()
 
-    def _cleanup_open_worker(self, worker: OpenAssetWorker) -> None:
-        self.open_workers.discard(worker)
-        worker.deleteLater()
-
-    def _cleanup_preview_worker(self, worker: PreviewAssetWorker) -> None:
-        self.preview_workers.discard(worker)
-        worker.deleteLater()
-
     def show_details(self, asset: dict[str, Any]) -> None:
+        asset_id = str(asset.get("asset_id") or "")
+        if not asset_id:
+            return
+        worker = AssetDetailWorker(self.api, asset_id)
+        self.detail_workers.add(worker)
+        worker.ready.connect(self._show_detail_dialog)
+        worker.failed.connect(lambda message: QMessageBox.warning(self, "Output metadata", message))
+        worker.finished.connect(lambda w=worker: self._cleanup_detail_worker(w))
+        worker.start()
+
+    def _show_detail_dialog(self, asset: dict[str, Any]) -> None:
         metadata = asset.get("metadata") or {}
         lines = [
             str(asset.get("filename") or "output"),
@@ -458,6 +593,18 @@ class GalleryPage(QWidget):
         if prompts:
             lines.append("\nPrompt metadata:\n" + "\n\n".join(str(value)[:3000] for value in prompts[:4]))
         QMessageBox.information(self, "Output metadata", "\n".join(lines))
+
+    def _cleanup_open_worker(self, worker: OpenAssetWorker) -> None:
+        self.open_workers.discard(worker)
+        worker.deleteLater()
+
+    def _cleanup_preview_worker(self, worker: PreviewAssetWorker) -> None:
+        self.preview_workers.discard(worker)
+        worker.deleteLater()
+
+    def _cleanup_detail_worker(self, worker: AssetDetailWorker) -> None:
+        self.detail_workers.discard(worker)
+        worker.deleteLater()
 
     def close(self) -> bool:
         self.thumbnail_worker.stop()

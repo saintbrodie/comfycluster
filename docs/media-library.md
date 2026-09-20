@@ -31,21 +31,55 @@ When an output is archived, the controller extracts stable provenance from the s
 
 For images, the controller verifies the actual archived image dimensions with Pillow rather than relying only on workflow hints.
 
-For videos, the controller can optionally use `ffprobe` to enrich the record with:
+For videos, the controller can optionally use `ffprobe` to enrich the record with duration, frame count, frame rate, video/audio codec, container format, and bit rate. If `ffprobe` is unavailable, archival still succeeds and those enrichment fields remain empty.
 
-- duration
-- frame count when the container exposes it
-- frame rate
+## Large-library API
+
+Gallery grids use a lightweight paginated summary API rather than returning the full rich metadata for every item:
+
+```text
+GET /api/v1/assets/search?offset=0&limit=60&sort_by=created_at&sort_order=desc
+```
+
+The response contains:
+
+- lightweight `AssetSummaryView` items
+- total authorized match count
+- offset and page size
+- `has_more`
+- active sort field/order
+
+Summary records include the fields needed to draw/filter cards (models, LoRAs, sampler, dimensions, duration, codecs, seeds, tags, face groups) but deliberately omit heavy/sensitive prompt text and other full provenance.
+
+Prompt text remains searchable because the controller's private search index includes it. A user can therefore search for an old generation by prompt without the entire prompt corpus being delivered to the desktop gallery.
+
+Full provenance is fetched only for one authorized item at a time:
+
+```text
+GET /api/v1/assets/{asset_id}
+```
+
+This is what the desktop **Details** action uses.
+
+### SQLite search index
+
+SQLite-backed controllers maintain a companion `asset_index` table beside the canonical JSON asset records. It stores authorization/sort/filter scalars and normalized searchable text, with indexes for:
+
+- creation time
+- private group + creation time
+- owner + creation time
+- media type + creation time
 - video codec
-- audio codec
-- container format
-- bit rate
+- duration
+- dimensions
 
-If `ffprobe` is unavailable, video archival still succeeds; those enrichment fields simply remain empty.
+Existing databases are backfilled idempotently when the repository opens. The canonical asset JSON remains authoritative, so this migration does not throw away full provenance.
+
+The in-memory repository keeps a functionally equivalent fallback for development/tests.
 
 ## Search and facets
 
-`GET /api/v1/assets` supports tenant-scoped filtering by:
+The paginated `/api/v1/assets/search` endpoint supports tenant-scoped filtering by:
 
 - free text (`q`) across filename, workflow, tags, models, LoRAs, prompts, and media codec/container metadata
 - model
@@ -63,9 +97,13 @@ If `ffprobe` is unavailable, video archival still succeeds; those enrichment fie
 - minimum width and height
 - minimum/maximum duration
 
+Supported server-side sort fields include created time, filename, size, duration, width, and height.
+
+`GET /api/v1/assets` remains as a compatibility endpoint for smaller integrations that still need rich records, but new gallery clients should use `/api/v1/assets/search` plus per-item detail requests.
+
 `GET /api/v1/assets/facets` returns only facet values visible to the authenticated principal, including available video/audio codecs and container formats.
 
-The desktop gallery currently promotes models, LoRAs, samplers, media family, video codec, group, and anonymous face group into visible filters, plus free-text search.
+The desktop gallery promotes models, LoRAs, samplers, media family, video codec, group, and anonymous face group into visible filters, plus free-text search. Filtering and pagination are server-driven rather than applying to a giant locally downloaded library.
 
 ## Thumbnails and poster frames
 
@@ -75,9 +113,7 @@ The authorized thumbnail endpoint is:
 GET /api/v1/assets/{asset_id}/thumbnail?size=320
 ```
 
-For images, the controller creates a JPEG thumbnail with Pillow.
-
-For videos, the controller can use `ffmpeg` to create a cached poster JPEG from an early frame. The full original is never downloaded just to populate the gallery grid.
+For images, the controller creates a JPEG thumbnail with Pillow. For videos, the controller can use `ffmpeg` to create a cached poster JPEG from an early frame. The full original is never downloaded just to populate the gallery grid.
 
 If `ffmpeg` is unavailable, video cards remain usable as metadata placeholders and the original can still be opened.
 
@@ -160,15 +196,15 @@ ComfyCluster asset metadata
 
 The analyzer should run only for groups with `face_grouping_enabled=true`, should never send raw face data outside the approved environment, and should avoid persisting embeddings unless an organization explicitly configures and protects such storage.
 
-## Scaling notes
+## Remaining scaling work
 
-The current prototype returns rich `AssetView` records including prompt metadata. For very large libraries, the next storage/API iteration should add:
+The paginated summary/index pass removes the largest desktop/API bottleneck for 100k-class archives. The next storage-scale steps are:
 
-- paginated `AssetSummaryView` for gallery grids
-- detail-on-demand for large prompt/provenance payloads
-- server-side pagination/sort
-- database indexes for frequently used facets
+- stop eagerly hydrating every canonical asset JSON record into controller memory at startup
+- cache or precompute high-cardinality facet sets/counts
+- cursor pagination for very deep result sets where large SQL offsets become expensive
 - async background media analysis rather than enrichment in the upload request
-- bounded derivative-cache eviction
+- bounded/LRU derivative-cache eviction
+- optional PostgreSQL/object-storage backend for multi-controller deployments
 
-Those changes do not require changing the privacy or provenance model described above.
+These changes do not require changing the tenant/privacy or provenance model described above.

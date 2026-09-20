@@ -93,9 +93,29 @@ class DesktopApi:
                 return None
             raise
 
+    @staticmethod
+    def _clean_params(filters: dict) -> dict:
+        return {key: value for key, value in filters.items() if value not in {None, "", "All"}}
+
     def query_assets(self, **filters) -> list[dict]:
-        params = {key: value for key, value in filters.items() if value not in {None, "", "All"}}
-        return self._controller_get("/api/v1/assets", params=params) or []
+        """Compatibility rich query. Gallery code should use query_asset_page()."""
+        return self._controller_get("/api/v1/assets", params=self._clean_params(filters)) or []
+
+    def query_asset_page(self, **filters) -> dict:
+        return self._controller_get(
+            "/api/v1/assets/search", params=self._clean_params(filters)
+        ) or {
+            "items": [],
+            "total": 0,
+            "offset": 0,
+            "limit": 60,
+            "has_more": False,
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+
+    def asset_detail(self, asset_id: str) -> dict:
+        return self._controller_get(f"/api/v1/assets/{asset_id}")
 
     def asset_facets(self) -> dict:
         return self._controller_optional("/api/v1/assets/facets") or {}
@@ -165,6 +185,7 @@ class DesktopApi:
             "nodes": [],
             "jobs": [],
             "assets": [],
+            "asset_page": None,
             "asset_facets": {},
             "queue_summary": None,
             "desired_release": None,
@@ -186,7 +207,12 @@ class DesktopApi:
             snapshot["models"] = self._controller_get("/api/v1/models")
             snapshot["nodes"] = self._controller_get("/api/v1/nodes")
             snapshot["jobs"] = self._controller_get("/api/v1/jobs")
-            snapshot["assets"] = self._controller_optional("/api/v1/assets") or []
+            page = self._controller_optional(
+                "/api/v1/assets/search",
+                params={"offset": 0, "limit": 60, "sort_by": "created_at", "sort_order": "desc"},
+            )
+            snapshot["asset_page"] = page
+            snapshot["assets"] = (page or {}).get("items") or []
             snapshot["asset_facets"] = self._controller_optional("/api/v1/assets/facets") or {}
             snapshot["queue_summary"] = self._controller_get("/api/v1/queue/summary")
             snapshot["desired_release"] = self._controller_optional("/api/v1/releases/desired")

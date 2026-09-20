@@ -11,7 +11,14 @@ from fastapi import Body, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from comfycluster_common.assets import AssetRecord, AssetView, FaceGroupingUpdate
+from comfycluster_common.assets import (
+    AssetPage,
+    AssetRecord,
+    AssetSortField,
+    AssetSortOrder,
+    AssetView,
+    FaceGroupingUpdate,
+)
 from comfycluster_common.models import utcnow
 from comfycluster_common.tenancy import Principal
 
@@ -162,6 +169,98 @@ def register_asset_routes(
             if not committed:
                 final_path.unlink(missing_ok=True)
 
+    def search_filters(
+        *,
+        q: str | None,
+        model: str | None,
+        lora: str | None,
+        sampler: str | None,
+        scheduler: str | None,
+        media_family: str | None,
+        video_codec: str | None,
+        audio_codec: str | None,
+        container_format: str | None,
+        group_id: str | None,
+        owner_user_id: str | None,
+        tag: str | None,
+        face_cluster_id: str | None,
+        min_width: int | None,
+        min_height: int | None,
+        min_duration_seconds: float | None,
+        max_duration_seconds: float | None,
+    ) -> dict:
+        return {
+            "q": q,
+            "model": model,
+            "lora": lora,
+            "sampler": sampler,
+            "scheduler": scheduler,
+            "media_family": media_family,
+            "video_codec": video_codec,
+            "audio_codec": audio_codec,
+            "container_format": container_format,
+            "group_id": group_id,
+            "owner_user_id": owner_user_id,
+            "tag": tag,
+            "face_cluster_id": face_cluster_id,
+            "min_width": min_width,
+            "min_height": min_height,
+            "min_duration_seconds": min_duration_seconds,
+            "max_duration_seconds": max_duration_seconds,
+        }
+
+    @app.get("/api/v1/assets/search", response_model=AssetPage)
+    async def search_assets(
+        q: str | None = None,
+        model: str | None = None,
+        lora: str | None = None,
+        sampler: str | None = None,
+        scheduler: str | None = None,
+        media_family: str | None = None,
+        video_codec: str | None = None,
+        audio_codec: str | None = None,
+        container_format: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        tag: str | None = None,
+        face_cluster_id: str | None = None,
+        min_width: int | None = None,
+        min_height: int | None = None,
+        min_duration_seconds: float | None = None,
+        max_duration_seconds: float | None = None,
+        offset: int = 0,
+        limit: int = 60,
+        sort_by: AssetSortField = "created_at",
+        sort_order: AssetSortOrder = "desc",
+        principal: Principal = Depends(current_principal),
+    ):
+        return repository.query_page_for_principal(
+            principal,
+            **search_filters(
+                q=q,
+                model=model,
+                lora=lora,
+                sampler=sampler,
+                scheduler=scheduler,
+                media_family=media_family,
+                video_codec=video_codec,
+                audio_codec=audio_codec,
+                container_format=container_format,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+                tag=tag,
+                face_cluster_id=face_cluster_id,
+                min_width=min_width,
+                min_height=min_height,
+                min_duration_seconds=min_duration_seconds,
+                max_duration_seconds=max_duration_seconds,
+            ),
+            offset=offset,
+            limit=limit,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+
     @app.get("/api/v1/assets", response_model=list[AssetView])
     async def list_assets(
         q: str | None = None,
@@ -181,28 +280,31 @@ def register_asset_routes(
         min_height: int | None = None,
         min_duration_seconds: float | None = None,
         max_duration_seconds: float | None = None,
-        limit: int = 500,
+        limit: int = 100,
         principal: Principal = Depends(current_principal),
     ):
+        """Compatibility endpoint returning rich records. New galleries should use /search."""
         return repository.query_for_principal(
             principal,
-            q=q,
-            model=model,
-            lora=lora,
-            sampler=sampler,
-            scheduler=scheduler,
-            media_family=media_family,
-            video_codec=video_codec,
-            audio_codec=audio_codec,
-            container_format=container_format,
-            group_id=group_id,
-            owner_user_id=owner_user_id,
-            tag=tag,
-            face_cluster_id=face_cluster_id,
-            min_width=min_width,
-            min_height=min_height,
-            min_duration_seconds=min_duration_seconds,
-            max_duration_seconds=max_duration_seconds,
+            **search_filters(
+                q=q,
+                model=model,
+                lora=lora,
+                sampler=sampler,
+                scheduler=scheduler,
+                media_family=media_family,
+                video_codec=video_codec,
+                audio_codec=audio_codec,
+                container_format=container_format,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+                tag=tag,
+                face_cluster_id=face_cluster_id,
+                min_width=min_width,
+                min_height=min_height,
+                min_duration_seconds=min_duration_seconds,
+                max_duration_seconds=max_duration_seconds,
+            ),
             limit=limit,
         )
 
