@@ -10,7 +10,7 @@
     header { padding:20px 28px; border-bottom:1px solid #2b2d31; display:flex; align-items:center; justify-content:space-between; gap:16px; }
     h1,h2,h3 { margin:0; } h1 { font-size:22px; } h2 { font-size:17px; margin:24px 0 10px; }
     main { padding:24px 28px 40px; max-width:1400px; margin:auto; }
-    .metrics { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+    .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:18px; }
     .metric,.card,.host { background:#17191d; border:1px solid #292c31; border-radius:10px; }
     .metric { padding:15px; } .metric .value { font-size:27px; font-weight:700; margin-top:4px; }
     .muted { color:#9298a1; } .small { font-size:12px; }
@@ -34,7 +34,7 @@
     #login input { width:100%; box-sizing:border-box; margin:14px 0 10px; }
     #app { display:none; }
     .privacy-note { padding:11px 13px; background:#141b22; border:1px solid #253443; border-radius:8px; color:#b9cde0; margin:12px 0 18px; }
-    @media (max-width:900px){.metrics{grid-template-columns:1fr 1fr}.gpu{grid-template-columns:1fr 1fr}.hosthead{align-items:flex-start;flex-direction:column}.hostmeta{justify-content:flex-start}}
+    @media (max-width:900px){.gpu{grid-template-columns:1fr 1fr}.hosthead{align-items:flex-start;flex-direction:column}.hostmeta{justify-content:flex-start}}
   </style>
 </head>
 <body>
@@ -51,15 +51,24 @@
   <div class="toolbar"><button onclick="fleet('fleet.start')">Start fleet</button><button onclick="fleet('fleet.stop')">Stop fleet</button><button onclick="logout()">Forget token</button></div>
 </header>
 <main>
-  <div class="privacy-note"><strong>Content isolation is active.</strong> This operations view uses job summaries only. Platform administrators can manage capacity and cancel jobs without receiving workflow or output content access.</div>
+  <div class="privacy-note"><strong>Content isolation is active.</strong> This operations view uses job and asset summaries only. Platform administrators can manage capacity, retention, and queues without receiving workflow or generated-content access.</div>
   <div class="metrics">
     <div class="metric"><div class="muted">Hosts</div><div class="value" id="hostsCount">0</div></div>
     <div class="metric"><div class="muted">GPUs</div><div class="value" id="gpuCount">0</div></div>
     <div class="metric"><div class="muted">Generating</div><div class="value" id="busyCount">0</div></div>
     <div class="metric"><div class="muted">Queued</div><div class="value" id="queuedCount">0</div></div>
     <div class="metric"><div class="muted">Groups</div><div class="value" id="groupCount">0</div></div>
+    <div class="metric"><div class="muted">Vault</div><div class="value" id="vaultSize">0 B</div></div>
   </div>
-  <div class="sectionhead"><h2>Group capacity</h2><div class="toolbar"><button onclick="createGroup()">New group</button><button onclick="createUser()">New user</button></div></div>
+  <div class="sectionhead">
+    <h2>Group capacity</h2>
+    <div class="toolbar">
+      <button onclick="previewRetention()">Preview retention</button>
+      <button class="danger" onclick="runRetention()">Run retention</button>
+      <button onclick="createGroup()">New group</button>
+      <button onclick="createUser()">New user</button>
+    </div>
+  </div>
   <section id="groups" class="grid"></section>
   <h2>Fleet</h2>
   <section id="hosts"></section>
@@ -71,6 +80,7 @@ let groupCache=[];
 function authHeaders(extra={}){return {...extra,'Authorization':`Bearer ${adminToken}`};}
 async function api(path,options={}){const response=await fetch(path,{...options,headers:authHeaders(options.headers||{})});if(response.status===401||response.status===403)throw new Error('Administrator authentication failed');if(!response.ok)throw new Error((await response.text())||`HTTP ${response.status}`);return response.status===204?null:response.json();}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
+function fmtBytes(value){let n=Number(value||0);const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return i===0?`${Math.round(n)} B`:`${n.toFixed(1)} ${u[i]}`;}
 function cliBadge(h){const cli=h.comfy_cli||{};if(!cli.available)return '<span class="pill offline">CLI unavailable</span>';if(cli.error)return '<span class="pill error">CLI error</span>';return `<span class="pill tooling">CLI ${esc(cli.version||'detected')}</span>`;}
 async function connectAdmin(){adminToken=document.getElementById('token').value.trim();try{const me=await api('/api/v1/me');if(!me.platform_admin)throw new Error('This credential is not a platform administrator');sessionStorage.setItem('comfyclusterAdminToken',adminToken);document.getElementById('login').style.display='none';document.getElementById('app').style.display='block';refresh();}catch(e){document.getElementById('loginError').textContent=e.message;}}
 function logout(){sessionStorage.removeItem('comfyclusterAdminToken');location.reload();}
@@ -78,13 +88,18 @@ async function command(host,action,payload={}){await api(`/api/v1/hosts/${host}/
 async function hostMode(host,action){await api(`/api/v1/hosts/${host}/${action}`,{method:'POST'});setTimeout(refresh,250);}
 async function fleet(action){const hosts=await api('/api/v1/hosts');await Promise.all(hosts.filter(h=>h.connected).map(h=>command(h.host_id,action)));}
 async function setGroupActiveById(groupId,active){const group=groupCache.find(g=>g.group_id===groupId);if(!group)return;await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...group,active})});refresh();}
+async function previewRetention(){const r=await api('/api/v1/admin/assets/retention/cleanup?dry_run=true',{method:'POST'});alert(`Retention preview: ${r.asset_count} assets, ${fmtBytes(r.bytes)} eligible for deletion.`);}
+async function runRetention(){const preview=await api('/api/v1/admin/assets/retention/cleanup?dry_run=true',{method:'POST'});if(!preview.asset_count){alert('No archived assets are currently past retention.');return;}if(!confirm(`Delete ${preview.asset_count} archived assets (${fmtBytes(preview.bytes)}) that are past group retention? This does not reveal their content.`))return;const r=await api('/api/v1/admin/assets/retention/cleanup?dry_run=false',{method:'POST'});alert(`Retention removed ${r.asset_count} assets (${fmtBytes(r.bytes)}).`);refresh();}
 async function createGroup(){
   const group_id=prompt('Group ID, for example creative-east');if(!group_id)return;
   const name=prompt('Group display name',group_id);if(!name)return;
   const max_running_jobs=Number(prompt('Maximum concurrent jobs for this group','2'));if(!Number.isFinite(max_running_jobs))return;
   const max_queued_jobs=Number(prompt('Maximum queued jobs for this group','50'));if(!Number.isFinite(max_queued_jobs))return;
   const weight=Number(prompt('Fair-share weight','1'));if(!Number.isFinite(weight)||weight<=0)return;
-  await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({group_id,name,policy:{max_running_jobs,max_queued_jobs,weight}})});refresh();
+  const max_storage_gb=Number(prompt('Private output storage quota in GB','250'));if(!Number.isFinite(max_storage_gb)||max_storage_gb<0)return;
+  const retentionRaw=prompt('Retention in days. Leave blank to keep indefinitely.','30');
+  const retention_days=retentionRaw===''?null:Number(retentionRaw);if(retention_days!==null&&(!Number.isFinite(retention_days)||retention_days<1))return;
+  await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({group_id,name,policy:{max_running_jobs,max_queued_jobs,weight,max_storage_bytes:Math.round(max_storage_gb*1024*1024*1024),retention_days}})});refresh();
 }
 async function createUser(){
   const user_id=prompt('User ID');if(!user_id)return;
@@ -100,10 +115,11 @@ async function createUser(){
 }
 async function refresh(){
   try{
-    const [hosts,groups,jobs]=await Promise.all([api('/api/v1/hosts'),api('/api/v1/admin/groups'),api('/api/v1/admin/jobs')]);groupCache=groups;
+    const [hosts,groups,jobs,storage]=await Promise.all([api('/api/v1/hosts'),api('/api/v1/admin/groups'),api('/api/v1/admin/jobs'),api('/api/v1/admin/assets/storage')]);groupCache=groups;
     let gpus=0,busy=0;for(const h of hosts){gpus+=h.gpus.length;busy+=h.workers.filter(w=>w.state==='busy').length;}
-    document.getElementById('hostsCount').textContent=hosts.length;document.getElementById('gpuCount').textContent=gpus;document.getElementById('busyCount').textContent=busy;document.getElementById('queuedCount').textContent=jobs.filter(j=>j.state==='queued').length;document.getElementById('groupCount').textContent=groups.length;
-    document.getElementById('groups').innerHTML=groups.map(g=>{const gj=jobs.filter(j=>j.group_id===g.group_id),running=gj.filter(j=>j.state==='running'||j.state==='dispatching').length,queued=gj.filter(j=>j.state==='queued').length,p=g.policy||{};return `<div class="card"><div class="row"><div><strong>${esc(g.name)}</strong><div class="muted small">${esc(g.group_id)}</div></div><span class="pill ${g.active?'idle':'offline'}">${g.active?'active':'paused'}</span></div><div class="row"><span class="muted">Running</span><strong>${running} / ${p.max_running_jobs??'?'}</strong></div><div class="row"><span class="muted">Queued</span><strong>${queued} / ${p.max_queued_jobs??'?'}</strong></div><div class="row"><span class="muted">Fair-share weight</span><strong>${p.weight??1}</strong></div><div class="row"><span></span><button class="group-toggle ${g.active?'danger':''}" data-group="${esc(g.group_id)}" data-active="${g.active?'1':'0'}">${g.active?'Pause group':'Resume group'}</button></div></div>`;}).join('')||'<p class="muted">No groups configured.</p>';
+    document.getElementById('hostsCount').textContent=hosts.length;document.getElementById('gpuCount').textContent=gpus;document.getElementById('busyCount').textContent=busy;document.getElementById('queuedCount').textContent=jobs.filter(j=>j.state==='queued').length;document.getElementById('groupCount').textContent=groups.length;document.getElementById('vaultSize').textContent=fmtBytes(storage.bytes);
+    const storageByGroup=new Map((storage.groups||[]).map(x=>[x.group_id||'unassigned',x]));
+    document.getElementById('groups').innerHTML=groups.map(g=>{const gj=jobs.filter(j=>j.group_id===g.group_id),running=gj.filter(j=>j.state==='running'||j.state==='dispatching').length,queued=gj.filter(j=>j.state==='queued').length,p=g.policy||{},s=storageByGroup.get(g.group_id)||{bytes:0,asset_count:0};const retention=p.retention_days==null?'Forever':`${p.retention_days} days`;return `<div class="card"><div class="row"><div><strong>${esc(g.name)}</strong><div class="muted small">${esc(g.group_id)}</div></div><span class="pill ${g.active?'idle':'offline'}">${g.active?'active':'paused'}</span></div><div class="row"><span class="muted">Running</span><strong>${running} / ${p.max_running_jobs??'?'}</strong></div><div class="row"><span class="muted">Queued</span><strong>${queued} / ${p.max_queued_jobs??'?'}</strong></div><div class="row"><span class="muted">Fair-share weight</span><strong>${p.weight??1}</strong></div><div class="row"><span class="muted">Private vault</span><strong>${fmtBytes(s.bytes)} / ${fmtBytes(p.max_storage_bytes)}</strong></div><div class="row"><span class="muted">Archived assets</span><strong>${s.asset_count||0}</strong></div><div class="row"><span class="muted">Retention</span><strong>${retention}</strong></div><div class="row"><span></span><button class="group-toggle ${g.active?'danger':''}" data-group="${esc(g.group_id)}" data-active="${g.active?'1':'0'}">${g.active?'Pause group':'Resume group'}</button></div></div>`;}).join('')||'<p class="muted">No groups configured.</p>';
     document.querySelectorAll('.group-toggle').forEach(button=>{button.onclick=()=>setGroupActiveById(button.dataset.group,button.dataset.active!=='1');});
     document.getElementById('hosts').innerHTML=hosts.map(h=>`<div class="host"><div class="hosthead"><div><strong>${esc(h.hostname)}</strong> <span class="muted">${esc(h.os_name)}</span><div class="muted">${h.nodes.length} custom node packages · ${h.models.length} model files</div></div><div class="hostmeta">${cliBadge(h)}${h.draining?'<span class="pill draining">draining</span>':''}<span class="pill ${h.connected?'idle':'offline'}">${h.connected?'connected':'offline'}</span>${h.draining?`<button onclick="hostMode('${esc(h.host_id)}','resume')">Resume</button>`:`<button onclick="hostMode('${esc(h.host_id)}','drain')">Drain</button>`}</div></div><div>${h.workers.map(w=>{const gpu=h.gpus.find(x=>x.uuid===w.gpu_uuid)||{};return `<div class="gpu"><div><strong>${esc(gpu.name||w.worker_id)}</strong><div class="muted">GPU ${w.gpu_index} · :${w.port}</div></div><div><span class="pill ${esc(w.state)}">${esc(w.state)}</span></div><div>${esc(gpu.memory_used_mb||0)} / ${esc(gpu.memory_total_mb||0)} MB</div><div><button onclick="command('${esc(h.host_id)}','worker.start',{worker_id:'${esc(w.worker_id)}'})">Start</button> <button onclick="command('${esc(h.host_id)}','worker.restart',{worker_id:'${esc(w.worker_id)}'})">Restart</button> <button onclick="command('${esc(h.host_id)}','worker.stop',{worker_id:'${esc(w.worker_id)}'})">Stop</button></div></div>`}).join('')}</div></div>`).join('')||'<p class="muted">No agents connected yet.</p>';
   }catch(e){console.error(e);}
