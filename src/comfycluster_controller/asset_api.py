@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from comfycluster_common.assets import AssetRecord, AssetView
+from comfycluster_common.models import utcnow
 from comfycluster_common.tenancy import Principal
 
 from .assets import AssetRepository, principal_can_view_asset
@@ -169,3 +171,66 @@ def register_asset_routes(
         removed = repository.delete(asset_id)
         if removed:
             Path(removed.storage_path).unlink(missing_ok=True)
+
+    @app.get("/api/v1/admin/assets/storage")
+    async def storage_summary(principal: Principal = Depends(current_principal)):
+        if not principal.platform_admin:
+            raise HTTPException(status_code=403, detail="platform administrator required")
+        records = repository.list_records()
+        groups: dict[str, dict[str, int | str | None]] = {}
+        for record in records:
+            key = record.group_id or "unassigned"
+            entry = groups.setdefault(
+                key,
+                {"group_id": record.group_id, "asset_count": 0, "bytes": 0},
+            )
+            entry["asset_count"] = int(entry["asset_count"]) + 1
+            entry["bytes"] = int(entry["bytes"]) + max(0, record.size_bytes)
+        return {
+            "asset_count": len(records),
+            "bytes": sum(max(0, record.size_bytes) for record in records),
+            "max_vault_bytes": max_vault_bytes,
+            "free_disk_bytes": shutil.disk_usage(asset_root).free,
+            "groups": sorted(groups.values(), key=lambda item: int(item["bytes"]), reverse=True),
+        }
+
+    @app.post("/api/v1/admin/assets/retention/cleanup")
+    async def cleanup_retention(
+        dry_run: bool = True,
+        principal: Principal = Depends(current_principal),
+    ):
+        if not principal.platform_admin:
+            raise HTTPException(status_code=403, detail="platform administrator required")
+
+        now = utcnow()
+        groups = {group.group_id: group for group in await store.list_groups()}
+        expired: list[AssetRecord] = []
+        for record in repository.list_records():
+            if not record.group_id:
+                continue
+            group = groups.get(record.group_id)
+            if group is None or group.policy.retention_days is None:
+                continue
+            cutoff = now - timedelta(days=group.policy.retention_days)
+            if record.created_at <= cutoff:
+                expired.append(record)
+
+        by_group: dict[str, dict[str, int | str]] = {}
+        for record in expired:
+            key = record.group_id or "unassigned"
+            entry = by_group.setdefault(key, {"group_id": key, "asset_count": 0, "bytes": 0})
+            entry["asset_count"] = int(entry["asset_count"]) + 1
+            entry["bytes"] = int(entry["bytes"]) + max(0, record.size_bytes)
+
+        if not dry_run:
+            for record in expired:
+                removed = repository.delete(record.asset_id)
+                if removed:
+                    Path(removed.storage_path).unlink(missing_ok=True)
+
+        return {
+            "dry_run": dry_run,
+            "asset_count": len(expired),
+            "bytes": sum(max(0, record.size_bytes) for record in expired),
+            "groups": sorted(by_group.values(), key=lambda item: str(item["group_id"])),
+        }
