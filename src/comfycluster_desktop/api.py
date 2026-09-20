@@ -34,9 +34,10 @@ class DesktopApi:
         payload: dict | None = None,
         timeout: float = 3.0,
         headers: dict[str, str] | None = None,
+        params: dict | None = None,
     ):
         with httpx.Client(timeout=timeout) as client:
-            response = client.request(method, url, json=payload, headers=headers)
+            response = client.request(method, url, json=payload, headers=headers, params=params)
             response.raise_for_status()
             if not response.content:
                 return None
@@ -76,20 +77,28 @@ class DesktopApi:
             headers=self._controller_headers(),
         )
 
-    def _controller_get(self, path: str):
+    def _controller_get(self, path: str, *, params: dict | None = None):
         return self._request(
             "GET",
             f"{self.controller_base}{path}",
             headers=self._controller_headers(),
+            params=params,
         )
 
-    def _controller_optional(self, path: str):
+    def _controller_optional(self, path: str, *, params: dict | None = None):
         try:
-            return self._controller_get(path)
+            return self._controller_get(path, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
             raise
+
+    def query_assets(self, **filters) -> list[dict]:
+        params = {key: value for key, value in filters.items() if value not in {None, "", "All"}}
+        return self._controller_get("/api/v1/assets", params=params) or []
+
+    def asset_facets(self) -> dict:
+        return self._controller_optional("/api/v1/assets/facets") or {}
 
     def download_asset(self, asset_id: str, filename: str) -> Path:
         cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "assets"
@@ -110,6 +119,21 @@ class DesktopApi:
                         handle.write(chunk)
         return destination
 
+    def download_thumbnail(self, asset_id: str, size: int = 320) -> Path:
+        cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "thumbnails"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        destination = cache_dir / f"{asset_id}-{size}.jpg"
+        headers = self._controller_headers()
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(
+                f"{self.controller_base}/api/v1/assets/{asset_id}/thumbnail",
+                params={"size": size},
+                headers=headers,
+            )
+            response.raise_for_status()
+            destination.write_bytes(response.content)
+        return destination
+
     def snapshot(self) -> dict:
         snapshot = {
             "local": None,
@@ -119,6 +143,7 @@ class DesktopApi:
             "nodes": [],
             "jobs": [],
             "assets": [],
+            "asset_facets": {},
             "queue_summary": None,
             "desired_release": None,
             "release_plan": None,
@@ -140,6 +165,7 @@ class DesktopApi:
             snapshot["nodes"] = self._controller_get("/api/v1/nodes")
             snapshot["jobs"] = self._controller_get("/api/v1/jobs")
             snapshot["assets"] = self._controller_optional("/api/v1/assets") or []
+            snapshot["asset_facets"] = self._controller_optional("/api/v1/assets/facets") or {}
             snapshot["queue_summary"] = self._controller_get("/api/v1/queue/summary")
             snapshot["desired_release"] = self._controller_optional("/api/v1/releases/desired")
             snapshot["release_plan"] = self._controller_optional("/api/v1/releases/plan")
