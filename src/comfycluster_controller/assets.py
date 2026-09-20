@@ -96,6 +96,15 @@ class AssetRepository:
             record = self._records.get(asset_id)
             return record.model_copy(deep=True) if record else None
 
+    def list_records(self) -> list[AssetRecord]:
+        with self._lock:
+            return [
+                record.model_copy(deep=True)
+                for record in sorted(
+                    self._records.values(), key=lambda item: item.created_at, reverse=True
+                )
+            ]
+
     def total_size_bytes(self) -> int:
         with self._lock:
             return self._total_size_unlocked()
