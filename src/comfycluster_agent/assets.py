@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, AsyncIterator, Iterable
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
@@ -71,6 +72,15 @@ def discover_output_files(comfy_home: Path, outputs: dict[str, Any]) -> list[Out
     return discovered
 
 
+async def stream_file(path: Path, chunk_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
+    with path.open("rb") as handle:
+        while True:
+            chunk = await asyncio.to_thread(handle.read, chunk_size)
+            if not chunk:
+                return
+            yield chunk
+
+
 class AssetUploader:
     def __init__(
         self,
@@ -91,7 +101,8 @@ class AssetUploader:
         if self.agent_token:
             headers["Authorization"] = f"Bearer {self.agent_token}"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=300.0)) as client:
+        timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             for item in files:
                 asset_id = uuid4()
                 query = urlencode(
@@ -108,8 +119,11 @@ class AssetUploader:
                     "Content-Type": item.media_type,
                     "Content-Length": str(file_size),
                 }
-                with item.path.open("rb") as handle:
-                    response = await client.put(url, content=handle, headers=request_headers)
+                response = await client.put(
+                    url,
+                    content=stream_file(item.path),
+                    headers=request_headers,
+                )
                 response.raise_for_status()
                 uploaded.append(response.json())
         return uploaded
