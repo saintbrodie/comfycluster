@@ -16,6 +16,7 @@ class GroupPolicy(BaseModel):
     max_queued_jobs: int = Field(default=50, ge=0)
     max_running_jobs: int = Field(default=2, ge=0)
     weight: float = Field(default=1.0, gt=0)
+    max_storage_bytes: int = Field(default=250 * 1024**3, ge=0)
 
 
 class GroupRecord(BaseModel):
