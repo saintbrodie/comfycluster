@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+from typing import Protocol
 
 from comfycluster_common.tenancy import Principal
 
@@ -24,32 +25,50 @@ def agent_authorized(authorization: str | None, expected_token: str | None) -> b
     return bool(value and hmac.compare_digest(value, expected_token))
 
 
+class HumanAuthProvider(Protocol):
+    """Pluggable human identity boundary for built-in tokens or future OIDC/SSO."""
+
+    async def authenticate(self, authorization: str | None) -> Principal | None: ...
+
+
+class BuiltinTokenAuthProvider:
+    """Current local token provider.
+
+    Keeping this behind HumanAuthProvider means Entra ID, generic OIDC, or another
+    enterprise identity provider can replace token resolution without changing every
+    controller endpoint or the tenancy/authorization rules that consume Principal.
+    """
+
+    def __init__(self, store: FleetStore, admin_token: str | None) -> None:
+        self.store = store
+        self.admin_token = admin_token
+
+    async def authenticate(self, authorization: str | None) -> Principal | None:
+        value = _bearer_value(authorization)
+        if not self.admin_token:
+            return Principal(
+                user_id="dev-admin",
+                display_name="Development Admin",
+                platform_admin=True,
+                content_auditor=True,
+            )
+        if not value:
+            return None
+        if hmac.compare_digest(value, self.admin_token):
+            return Principal(
+                user_id="platform-admin",
+                display_name="Platform Admin",
+                platform_admin=True,
+                content_auditor=False,
+            )
+        return await self.store.principal_for_token(value)
+
+
 async def authenticate_principal(
     authorization: str | None,
     store: FleetStore,
     admin_token: str | None,
 ) -> Principal | None:
-    """Resolve a human API principal without conflating agent and user credentials.
-
-    With no configured admin token the controller remains in explicit development
-    mode so the existing local demo/test flow stays zero-config. Production installs
-    generate an admin token and therefore require bearer authentication.
-    """
-    value = _bearer_value(authorization)
-    if not admin_token:
-        return Principal(
-            user_id="dev-admin",
-            display_name="Development Admin",
-            platform_admin=True,
-            content_auditor=True,
-        )
-    if not value:
-        return None
-    if hmac.compare_digest(value, admin_token):
-        return Principal(
-            user_id="platform-admin",
-            display_name="Platform Admin",
-            platform_admin=True,
-            content_auditor=False,
-        )
-    return await store.principal_for_token(value)
+    """Compatibility entrypoint for the controller's human authentication boundary."""
+    provider: HumanAuthProvider = BuiltinTokenAuthProvider(store, admin_token)
+    return await provider.authenticate(authorization)
