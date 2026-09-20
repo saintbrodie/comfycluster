@@ -51,6 +51,26 @@ class AssetRepository:
             record = self._records.get(asset_id)
             return record.model_copy(deep=True) if record else None
 
+    def total_size_bytes(self) -> int:
+        with self._lock:
+            return sum(max(0, record.size_bytes) for record in self._records.values())
+
+    def group_size_bytes(self, group_id: str | None) -> int:
+        with self._lock:
+            return sum(
+                max(0, record.size_bytes)
+                for record in self._records.values()
+                if record.group_id == group_id
+            )
+
+    def user_size_bytes(self, user_id: str | None) -> int:
+        with self._lock:
+            return sum(
+                max(0, record.size_bytes)
+                for record in self._records.values()
+                if record.owner_user_id == user_id
+            )
+
     def list_for_principal(self, principal: Principal) -> list[AssetView]:
         with self._lock:
             records = sorted(self._records.values(), key=lambda item: item.created_at, reverse=True)
