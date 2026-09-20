@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    from .window import run_desktop
+    from .enhanced_window import run_desktop
 
     return run_desktop(DesktopSettings())
 
