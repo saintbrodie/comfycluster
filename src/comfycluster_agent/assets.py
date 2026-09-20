@@ -90,12 +90,14 @@ class AssetUploader:
         comfy_home: Path,
         *,
         delete_after_archive: bool = False,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.base_url = controller_http_base(controller_url)
         self.agent_token = agent_token
         self.host_id = host_id
         self.comfy_home = comfy_home
         self.delete_after_archive = delete_after_archive
+        self.transport = transport
 
     async def upload_job_outputs(self, job_id: UUID, outputs: dict[str, Any]) -> list[dict[str, Any]]:
         files = discover_output_files(self.comfy_home, outputs)
@@ -105,7 +107,7 @@ class AssetUploader:
             headers["Authorization"] = f"Bearer {self.agent_token}"
 
         timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
             for item in files:
                 asset_id = uuid4()
                 query = urlencode(
