@@ -167,12 +167,30 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home_layout = self._scroll_page("Home", "This workstation and its ComfyUI workers.")
-        self.comfy_layout = self._scroll_page("Comfy Environments", "Managed ComfyUI runtimes on this workstation.")
-        self.models_table = self._table_page("Models", "Cluster model inventory and availability.", ["Model", "Type", "Size", "This PC", "Cluster"])
-        self.nodes_table = self._table_page("Custom Nodes", "Custom-node packages visible across the fleet.", ["Node", "This PC Commit", "Hosts", "Status"])
-        self.outputs_table = self._table_page("Outputs", "Recent ComfyCluster jobs and their generated outputs.", ["State", "Created", "Host", "Worker", "Outputs", "Job"])
-        self.cluster_layout = self._scroll_page("Cluster", "All Windows hosts and GPU workers known to the controller.")
-        self.settings_layout = self._scroll_page("Settings", "Desktop connection and local agent information.")
+        self.comfy_layout = self._scroll_page(
+            "Comfy Environments", "Managed ComfyUI runtimes on this workstation."
+        )
+        self.models_table = self._table_page(
+            "Models",
+            "Cluster model inventory and availability.",
+            ["Model", "Type", "Size", "This PC", "Cluster"],
+        )
+        self.nodes_table = self._table_page(
+            "Custom Nodes",
+            "Custom-node packages visible across the fleet.",
+            ["Node", "This PC Commit", "Hosts", "Status"],
+        )
+        self.outputs_table = self._table_page(
+            "Outputs",
+            "Only jobs and outputs authorized for your account and private groups are shown.",
+            ["State", "Created", "Host", "Worker", "Outputs", "Job"],
+        )
+        self.cluster_layout = self._scroll_page(
+            "Cluster", "Windows hosts and GPU workers visible to your account."
+        )
+        self.settings_layout = self._scroll_page(
+            "Settings", "Desktop connection and local agent information."
+        )
 
         labels = ["Home", "Comfy", "Models", "Custom Nodes", "Outputs", "Cluster", "Settings"]
         self.nav_buttons: list[QPushButton] = []
@@ -186,9 +204,10 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.connection_badge = badge("Starting...", "neutral")
         side.addWidget(self.connection_badge)
-        hint = QLabel("Windows desktop preview")
-        hint.setObjectName("muted")
-        side.addWidget(hint)
+        self.identity_label = QLabel("Not signed in")
+        self.identity_label.setObjectName("muted")
+        self.identity_label.setWordWrap(True)
+        side.addWidget(self.identity_label)
 
         root.addWidget(sidebar)
         root.addWidget(self.stack, 1)
@@ -256,6 +275,8 @@ class MainWindow(QMainWindow):
         self.connection_badge.setText(text)
         self.connection_badge.setStyleSheet(styled.styleSheet())
         styled.deleteLater()
+        me = snapshot.get("me") or {}
+        self.identity_label.setText(str(me.get("display_name") or "Not signed in"))
         self._render_home()
         self._render_comfy()
         self._render_models()
@@ -265,7 +286,68 @@ class MainWindow(QMainWindow):
         self._render_settings()
 
     def _registration(self) -> dict:
-        return ((self.snapshot.get("local") or {}).get("registration") or {})
+        return (self.snapshot.get("local") or {}).get("registration") or {}
+
+    def _is_admin(self) -> bool:
+        return bool((self.snapshot.get("me") or {}).get("platform_admin"))
+
+    def _render_identity_and_queue(self) -> None:
+        me = self.snapshot.get("me") or {}
+        queue = self.snapshot.get("queue_summary") or {}
+        if not me:
+            if self.snapshot.get("controller_error"):
+                card = Card()
+                title = QLabel("Cluster sign-in required")
+                title.setObjectName("sectionTitle")
+                card.body.addWidget(title)
+                detail = QLabel(
+                    "Local Comfy controls still work. Ask a ComfyCluster administrator for a user token "
+                    "to access private group jobs and cluster services."
+                )
+                detail.setObjectName("muted")
+                detail.setWordWrap(True)
+                card.body.addWidget(detail)
+                self.home_layout.addWidget(card)
+            return
+
+        card = Card()
+        top = QHBoxLayout()
+        identity = QVBoxLayout()
+        name = QLabel(str(me.get("display_name") or me.get("user_id") or "User"))
+        name.setObjectName("sectionTitle")
+        identity.addWidget(name)
+        groups = me.get("group_ids") or []
+        group_text = ", ".join(str(item) for item in groups) if groups else "No private group assigned"
+        group_label = QLabel(group_text)
+        group_label.setObjectName("muted")
+        identity.addWidget(group_label)
+        top.addLayout(identity, 1)
+        top.addWidget(badge("PLATFORM ADMIN" if me.get("platform_admin") else "PRIVATE GROUPS", "accent"))
+        card.body.addLayout(top)
+
+        user_queue = queue.get("user") or {}
+        own = QLabel(
+            f"Your queue: {user_queue.get('running', 0)} running  |  "
+            f"{user_queue.get('queued', 0)} waiting"
+        )
+        own.setObjectName("muted")
+        card.body.addWidget(own)
+
+        for group in queue.get("groups") or []:
+            policy = group.get("policy") or {}
+            row = QHBoxLayout()
+            row.addWidget(QLabel(str(group.get("name") or group.get("group_id") or "Group")), 1)
+            row.addWidget(
+                QLabel(
+                    f"{group.get('running', 0)} / {policy.get('max_running_jobs', '?')} running"
+                )
+            )
+            row.addWidget(
+                QLabel(f"{group.get('queued', 0)} / {policy.get('max_queued_jobs', '?')} queued")
+            )
+            row.addWidget(badge(f"weight {policy.get('weight', 1)}", "neutral"))
+            card.body.addLayout(row)
+        self.home_layout.addWidget(card)
 
     def _render_home(self) -> None:
         clear_layout(self.home_layout)
@@ -273,7 +355,9 @@ class MainWindow(QMainWindow):
         gpus = registration.get("gpus") or []
         workers = registration.get("workers") or []
         total_vram = sum(int(gpu.get("memory_total_mb") or 0) for gpu in gpus)
-        running = sum(1 for worker in workers if worker.get("state") not in {"stopped", "offline"})
+        running = sum(
+            1 for worker in workers if worker.get("state") not in {"stopped", "offline"}
+        )
         connected = bool((self.snapshot.get("local") or {}).get("controller_connected"))
 
         metrics = QHBoxLayout()
@@ -292,6 +376,7 @@ class MainWindow(QMainWindow):
             card.body.addWidget(value_label)
             metrics.addWidget(card)
         self.home_layout.addLayout(metrics)
+        self._render_identity_and_queue()
 
         env = Card()
         comfy = registration.get("comfy") or {}
@@ -329,12 +414,14 @@ class MainWindow(QMainWindow):
         actions.addWidget(open_button)
         for label, operation in (("Start All", "start"), ("Stop All", "stop")):
             button = QPushButton(label)
-            button.clicked.connect(lambda _checked=False, op=operation: self.local_fleet_action(op))
+            button.clicked.connect(
+                lambda _checked=False, op=operation: self.local_fleet_action(op)
+            )
             actions.addWidget(button)
         restart = QPushButton("Restart All")
         restart.clicked.connect(self.restart_all_workers)
         actions.addWidget(restart)
-        if host:
+        if host and self._is_admin():
             operation = "resume" if host.get("draining") else "drain"
             drain = QPushButton("Resume Host" if host.get("draining") else "Drain Host")
             drain.clicked.connect(lambda _checked=False, op=operation: self.host_mode(op))
@@ -387,7 +474,9 @@ class MainWindow(QMainWindow):
         desired = self.snapshot.get("desired_release") or {}
         plan = self.snapshot.get("release_plan") or {}
         host_id = self.snapshot.get("host_id")
-        host_plan = next((item for item in plan.get("hosts", []) if item.get("host_id") == host_id), {})
+        host_plan = next(
+            (item for item in plan.get("hosts", []) if item.get("host_id") == host_id), {}
+        )
         card = Card()
         top = QHBoxLayout()
         title_box = QVBoxLayout()
@@ -400,7 +489,12 @@ class MainWindow(QMainWindow):
         title_box.addWidget(path)
         top.addLayout(title_box, 1)
         if host_plan:
-            top.addWidget(badge("IN SYNC" if host_plan.get("in_sync") else "DRIFT", "good" if host_plan.get("in_sync") else "warn"))
+            top.addWidget(
+                badge(
+                    "IN SYNC" if host_plan.get("in_sync") else "DRIFT",
+                    "good" if host_plan.get("in_sync") else "warn",
+                )
+            )
         card.body.addLayout(top)
         for key, value in (
             ("Comfy version", comfy.get("version") or "Unknown"),
@@ -418,7 +512,9 @@ class MainWindow(QMainWindow):
             row.addWidget(QLabel(str(value)))
             card.body.addLayout(row)
         if host_plan.get("drift"):
-            drift = QLabel("Drift: " + ", ".join(item.get("kind", "unknown") for item in host_plan["drift"]))
+            drift = QLabel(
+                "Drift: " + ", ".join(item.get("kind", "unknown") for item in host_plan["drift"])
+            )
             drift.setStyleSheet("color:#ffd46e;")
             drift.setWordWrap(True)
             card.body.addWidget(drift)
@@ -451,14 +547,19 @@ class MainWindow(QMainWindow):
         host_count = max(1, len(self.snapshot.get("hosts") or []))
         rows = []
         for item in self.snapshot.get("models") or []:
-            key = (str(item.get("category", "")).casefold(), str(item.get("name", "")).casefold())
-            rows.append([
-                str(item.get("name") or ""),
-                str(item.get("category") or ""),
-                fmt_size(item.get("size_bytes")),
-                "Yes" if key in local_keys else "No",
-                f"{item.get('host_count', 0)} / {host_count}",
-            ])
+            key = (
+                str(item.get("category", "")).casefold(),
+                str(item.get("name", "")).casefold(),
+            )
+            rows.append(
+                [
+                    str(item.get("name") or ""),
+                    str(item.get("category") or ""),
+                    fmt_size(item.get("size_bytes")),
+                    "Yes" if key in local_keys else "No",
+                    f"{item.get('host_count', 0)} / {host_count}",
+                ]
+            )
         self._set_table(self.models_table, rows)
 
     def _render_nodes(self) -> None:
@@ -468,14 +569,20 @@ class MainWindow(QMainWindow):
         for item in self.snapshot.get("nodes") or []:
             hosts = item.get("hosts") or {}
             local = hosts.get(host_id) or {}
-            commits = {str(value.get("git_commit")) for value in hosts.values() if value.get("git_commit")}
+            commits = {
+                str(value.get("git_commit"))
+                for value in hosts.values()
+                if value.get("git_commit")
+            }
             status = "Consistent" if len(commits) <= 1 and len(hosts) == host_count else "Check fleet"
-            rows.append([
-                str(item.get("name") or ""),
-                str(local.get("git_commit") or "Not installed"),
-                f"{len(hosts)} / {host_count}",
-                status,
-            ])
+            rows.append(
+                [
+                    str(item.get("name") or ""),
+                    str(local.get("git_commit") or "Not installed"),
+                    f"{len(hosts)} / {host_count}",
+                    status,
+                ]
+            )
         self._set_table(self.nodes_table, rows)
 
     def _render_outputs(self) -> None:
@@ -483,14 +590,16 @@ class MainWindow(QMainWindow):
         for job in (self.snapshot.get("jobs") or [])[:100]:
             outputs = job.get("outputs") or {}
             count = len(outputs)
-            rows.append([
-                str(job.get("state") or ""),
-                str(job.get("created_at") or "").replace("T", " ")[:19],
-                str(job.get("assigned_host_id") or ""),
-                str(job.get("assigned_worker_id") or ""),
-                str(count),
-                str(job.get("job_id") or "")[:12],
-            ])
+            rows.append(
+                [
+                    str(job.get("state") or ""),
+                    str(job.get("created_at") or "").replace("T", " ")[:19],
+                    str(job.get("assigned_host_id") or ""),
+                    str(job.get("assigned_worker_id") or ""),
+                    str(count),
+                    str(job.get("job_id") or "")[:12],
+                ]
+            )
         self._set_table(self.outputs_table, rows)
 
     def _render_cluster(self) -> None:
@@ -508,24 +617,38 @@ class MainWindow(QMainWindow):
             name.setObjectName("sectionTitle")
             name_box.addWidget(name)
             summary = QLabel(
-                f"{len(host.get('gpus') or [])} GPUs  |  {len(host.get('models') or [])} models  |  {len(host.get('nodes') or [])} nodes"
+                f"{len(host.get('gpus') or [])} GPUs  |  {len(host.get('models') or [])} models  |  "
+                f"{len(host.get('nodes') or [])} nodes"
             )
             summary.setObjectName("muted")
             name_box.addWidget(summary)
             top.addLayout(name_box, 1)
             if host.get("draining"):
                 top.addWidget(badge("DRAINING", "warn"))
-            top.addWidget(badge("ONLINE" if host.get("connected") else "OFFLINE", "good" if host.get("connected") else "bad"))
-            host_id = str(host.get("host_id"))
-            operation = "resume" if host.get("draining") else "drain"
-            button = QPushButton("Resume" if host.get("draining") else "Drain")
-            button.clicked.connect(
-                lambda _checked=False, hid=host_id, op=operation: self.host_mode(op, hid)
+            top.addWidget(
+                badge(
+                    "ONLINE" if host.get("connected") else "OFFLINE",
+                    "good" if host.get("connected") else "bad",
+                )
             )
-            top.addWidget(button)
+            if self._is_admin():
+                host_id = str(host.get("host_id"))
+                operation = "resume" if host.get("draining") else "drain"
+                button = QPushButton("Resume" if host.get("draining") else "Drain")
+                button.clicked.connect(
+                    lambda _checked=False, hid=host_id, op=operation: self.host_mode(op, hid)
+                )
+                top.addWidget(button)
             card.body.addLayout(top)
             for worker in host.get("workers") or []:
-                gpu = next((item for item in host.get("gpus") or [] if item.get("uuid") == worker.get("gpu_uuid")), {})
+                gpu = next(
+                    (
+                        item
+                        for item in host.get("gpus") or []
+                        if item.get("uuid") == worker.get("gpu_uuid")
+                    ),
+                    {},
+                )
                 row = QHBoxLayout()
                 row.addWidget(QLabel(str(gpu.get("name") or worker.get("worker_id"))), 1)
                 row.addWidget(QLabel(f"GPU {worker.get('gpu_index')}  :{worker.get('port')}"))
@@ -537,7 +660,9 @@ class MainWindow(QMainWindow):
     def _render_settings(self) -> None:
         clear_layout(self.settings_layout)
         card = Card()
+        me = self.snapshot.get("me") or {}
         for key, value in (
+            ("Signed in as", me.get("display_name") or "Not signed in"),
             ("Controller", self.snapshot.get("controller_base") or ""),
             ("Local agent API", self.settings.local_api_url),
             ("Host ID", self.snapshot.get("host_id") or self.settings.host_id),
@@ -553,9 +678,10 @@ class MainWindow(QMainWindow):
             row.addWidget(value_label)
             card.body.addLayout(row)
         buttons = QHBoxLayout()
-        admin = QPushButton("Open Controller Admin")
-        admin.clicked.connect(self.open_controller)
-        buttons.addWidget(admin)
+        if self._is_admin():
+            admin = QPushButton("Open Controller Admin")
+            admin.clicked.connect(self.open_controller)
+            buttons.addWidget(admin)
         refresh = QPushButton("Refresh Now")
         refresh.clicked.connect(self.refresh_now)
         buttons.addWidget(refresh)
