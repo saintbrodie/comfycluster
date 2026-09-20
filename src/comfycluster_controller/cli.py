@@ -144,5 +144,41 @@ def issue_user_token(
     typer.echo(token)
 
 
+@app.command("set-face-grouping")
+def set_face_grouping(
+    group_id: str = typer.Option(..., help="Private group identifier"),
+    enabled: bool = typer.Option(
+        True,
+        "--enabled/--disabled",
+        help="Enable or disable anonymous face grouping for this group",
+    ),
+) -> None:
+    """Opt a private group into or out of anonymous face clustering."""
+
+    async def run() -> bool:
+        store = _durable_store()
+        try:
+            group = await store.get_group(group_id)
+            if group is None:
+                raise KeyError(f"unknown group {group_id}")
+            updated = group.model_copy(
+                update={
+                    "policy": group.policy.model_copy(
+                        update={"face_grouping_enabled": enabled}
+                    )
+                }
+            )
+            await store.create_group(updated)
+            return updated.policy.face_grouping_enabled
+        finally:
+            _close_store(store)
+
+    try:
+        result = asyncio.run(run())
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{group_id}: face grouping {'enabled' if result else 'disabled'}")
+
+
 if __name__ == "__main__":
     app()
