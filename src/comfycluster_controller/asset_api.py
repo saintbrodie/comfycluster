@@ -41,22 +41,6 @@ def register_asset_routes(
     app.state.assets = repository
     app.state.asset_root = asset_root
 
-    async def enforce_capacity(job, incoming_bytes: int) -> None:
-        if incoming_bytes > max_asset_bytes:
-            raise HTTPException(status_code=413, detail="asset exceeds per-file size limit")
-        vault_bytes = repository.total_size_bytes()
-        if vault_bytes + incoming_bytes > max_vault_bytes:
-            raise HTTPException(status_code=507, detail="asset vault capacity limit reached")
-        if job.group_id:
-            group = await store.get_group(job.group_id)
-            if group:
-                group_bytes = repository.group_size_bytes(job.group_id)
-                if group_bytes + incoming_bytes > group.policy.max_storage_bytes:
-                    raise HTTPException(status_code=507, detail="group storage quota reached")
-        free_bytes = shutil.disk_usage(asset_root).free
-        if free_bytes - incoming_bytes < min_free_bytes:
-            raise HTTPException(status_code=507, detail="controller minimum free-space reserve reached")
-
     @app.put("/api/v1/agents/jobs/{job_id}/assets/{asset_id}", response_model=AssetView)
     async def upload_asset(
         job_id: UUID,
@@ -75,54 +59,72 @@ def register_asset_routes(
         if host_id and job.assigned_host_id and host_id != job.assigned_host_id:
             raise HTTPException(status_code=403, detail="job is assigned to another host")
 
-        content_length = request.headers.get("content-length")
-        declared_size = int(content_length) if content_length else 0
-        if declared_size:
-            await enforce_capacity(job, declared_size)
+        raw_length = request.headers.get("content-length")
+        if not raw_length:
+            raise HTTPException(status_code=411, detail="content-length is required for asset uploads")
+        try:
+            declared_size = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid content-length") from exc
+        if declared_size < 0:
+            raise HTTPException(status_code=400, detail="invalid content-length")
+        if declared_size > max_asset_bytes:
+            raise HTTPException(status_code=413, detail="asset exceeds per-file size limit")
+
+        group = await store.get_group(job.group_id) if job.group_id else None
+        reason = repository.reserve_capacity(
+            job.group_id,
+            declared_size,
+            max_vault_bytes=max_vault_bytes,
+            max_group_bytes=group.policy.max_storage_bytes if group else None,
+        )
+        if reason:
+            raise HTTPException(status_code=507, detail=reason)
 
         safe_name = _safe_filename(filename)
         job_dir = asset_root / str(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         final_path = job_dir / f"{asset_id}_{safe_name}"
         temp_path = final_path.with_suffix(final_path.suffix + ".partial")
-        size = 0
-        base_vault_bytes = repository.total_size_bytes()
-        base_group_bytes = repository.group_size_bytes(job.group_id)
-        group = await store.get_group(job.group_id) if job.group_id else None
+        committed = False
         try:
+            if shutil.disk_usage(asset_root).free - declared_size < min_free_bytes:
+                raise HTTPException(
+                    status_code=507,
+                    detail="controller minimum free-space reserve reached",
+                )
+
+            size = 0
             with temp_path.open("wb") as handle:
                 async for chunk in request.stream():
                     size += len(chunk)
-                    if size > max_asset_bytes:
-                        raise HTTPException(status_code=413, detail="asset exceeds per-file size limit")
-                    if base_vault_bytes + size > max_vault_bytes:
-                        raise HTTPException(status_code=507, detail="asset vault capacity limit reached")
-                    if group and base_group_bytes + size > group.policy.max_storage_bytes:
-                        raise HTTPException(status_code=507, detail="group storage quota reached")
-                    if shutil.disk_usage(asset_root).free < min_free_bytes:
-                        raise HTTPException(
-                            status_code=507,
-                            detail="controller minimum free-space reserve reached",
-                        )
+                    if size > declared_size or size > max_asset_bytes:
+                        raise HTTPException(status_code=400, detail="asset size exceeded content-length")
                     handle.write(chunk)
-            os.replace(temp_path, final_path)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
+            if size != declared_size:
+                raise HTTPException(status_code=400, detail="asset size did not match content-length")
 
-        record = AssetRecord(
-            asset_id=asset_id,
-            job_id=job_id,
-            owner_user_id=job.owner_user_id,
-            group_id=job.group_id,
-            visibility=job.visibility,
-            filename=safe_name,
-            media_type=request.headers.get("content-type") or "application/octet-stream",
-            size_bytes=size,
-            node_id=node_id,
-            storage_path=str(final_path),
-        )
-        return AssetView.from_record(repository.create(record))
+            os.replace(temp_path, final_path)
+            record = AssetRecord(
+                asset_id=asset_id,
+                job_id=job_id,
+                owner_user_id=job.owner_user_id,
+                group_id=job.group_id,
+                visibility=job.visibility,
+                filename=safe_name,
+                media_type=request.headers.get("content-type") or "application/octet-stream",
+                size_bytes=size,
+                node_id=node_id,
+                storage_path=str(final_path),
+            )
+            stored = repository.create(record)
+            committed = True
+            return AssetView.from_record(stored)
+        finally:
+            repository.release_capacity(job.group_id, declared_size)
+            temp_path.unlink(missing_ok=True)
+            if not committed:
+                final_path.unlink(missing_ok=True)
 
     @app.get("/api/v1/assets", response_model=list[AssetView])
     async def list_assets(principal: Principal = Depends(current_principal)):
