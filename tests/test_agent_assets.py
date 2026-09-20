@@ -1,6 +1,11 @@
+import asyncio
 from pathlib import Path
+from uuid import uuid4
 
-from comfycluster_agent.assets import controller_http_base, discover_output_files
+import httpx
+import pytest
+
+from comfycluster_agent.assets import AssetUploader, controller_http_base, discover_output_files
 
 
 def test_controller_http_base_converts_agent_websocket_url():
@@ -60,3 +65,88 @@ def test_discover_output_files_does_not_escape_output_root(tmp_path: Path):
     )
 
     assert files == []
+
+
+def test_verified_archive_can_delete_local_source(tmp_path: Path):
+    comfy = tmp_path / "ComfyUI"
+    output = comfy / "output"
+    output.mkdir(parents=True)
+    source = output / "result.png"
+    source.write_bytes(b"image-bytes")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = await request.aread()
+        asset_id = request.url.path.rsplit("/", 1)[-1]
+        assert body == b"image-bytes"
+        return httpx.Response(
+            200,
+            json={
+                "asset_id": asset_id,
+                "job_id": str(uuid4()),
+                "filename": "result.png",
+                "media_type": "image/png",
+                "size_bytes": len(body),
+                "created_at": "2026-09-20T00:00:00Z",
+                "visibility": "group",
+            },
+        )
+
+    uploader = AssetUploader(
+        "ws://controller:9320/api/v1/agents/ws",
+        "agent-token",
+        "render-01",
+        comfy,
+        delete_after_archive=True,
+        transport=httpx.MockTransport(handler),
+    )
+    result = asyncio.run(
+        uploader.upload_job_outputs(
+            uuid4(),
+            {"1": {"images": [{"filename": "result.png", "type": "output"}]}},
+        )
+    )
+
+    assert result[0]["source_deleted"] is True
+    assert not source.exists()
+
+
+def test_local_source_is_kept_if_archive_verification_fails(tmp_path: Path):
+    comfy = tmp_path / "ComfyUI"
+    output = comfy / "output"
+    output.mkdir(parents=True)
+    source = output / "result.png"
+    source.write_bytes(b"image-bytes")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        asset_id = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "asset_id": asset_id,
+                "job_id": str(uuid4()),
+                "filename": "result.png",
+                "media_type": "image/png",
+                "size_bytes": 1,
+                "created_at": "2026-09-20T00:00:00Z",
+                "visibility": "group",
+            },
+        )
+
+    uploader = AssetUploader(
+        "ws://controller:9320/api/v1/agents/ws",
+        "agent-token",
+        "render-01",
+        comfy,
+        delete_after_archive=True,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ValueError, match="archived asset size"):
+        asyncio.run(
+            uploader.upload_job_outputs(
+                uuid4(),
+                {"1": {"images": [{"filename": "result.png", "type": "output"}]}},
+            )
+        )
+    assert source.exists()
