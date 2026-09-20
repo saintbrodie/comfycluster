@@ -1,7 +1,6 @@
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 from fastapi import Header, HTTPException
 from fastapi.testclient import TestClient
 
