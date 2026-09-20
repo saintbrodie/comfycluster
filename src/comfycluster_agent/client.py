@@ -7,6 +7,7 @@ import socket
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import uvicorn
 import websockets
 from websockets.asyncio.client import connect
@@ -14,6 +15,7 @@ from websockets.asyncio.client import connect
 from comfycluster_common.models import AgentEvent, HostHeartbeat, HostRegistration
 from comfycluster_common.protocol import parse_controller_command
 
+from .assets import AssetUploader
 from .comfy import discover_comfy
 from .comfy_cli import ComfyCliAdapter
 from .gpu import discover_gpus
@@ -37,11 +39,22 @@ class AgentClient:
         cli_workspace = Path(self.comfy.path) if self.comfy else Path.cwd()
         self.comfy_cli_adapter = ComfyCliAdapter(cli_workspace, settings.comfy_cli_executable)
         self.comfy_cli = self.comfy_cli_adapter.discover_info()
+        self.asset_uploader = self._build_asset_uploader()
         self.controller_connected = False
 
     @staticmethod
     def _host_id() -> str:
         return socket.gethostname().lower()
+
+    def _build_asset_uploader(self) -> AssetUploader | None:
+        if not self.comfy:
+            return None
+        return AssetUploader(
+            self.settings.controller_url,
+            self.settings.agent_token,
+            self.host_id,
+            Path(self.comfy.path),
+        )
 
     def registration(self) -> HostRegistration:
         return HostRegistration(
@@ -127,15 +140,23 @@ class AgentClient:
             self.runtime.gpus = self.gpus
             await self.runtime.probe_workers()
             for terminal in await self.runtime.poll_jobs():
+                payload = {
+                    "prompt_id": terminal["prompt_id"],
+                    "status": terminal["status"],
+                    "outputs": terminal["outputs"],
+                }
+                if terminal["event"] == "job.completed" and self.asset_uploader:
+                    try:
+                        payload["assets"] = await self.asset_uploader.upload_job_outputs(
+                            terminal["job_id"], terminal["outputs"]
+                        )
+                    except (httpx.HTTPError, OSError, ValueError) as exc:
+                        payload["asset_archive_error"] = str(exc)
                 event = AgentEvent(
                     host_id=self.host_id,
                     event=terminal["event"],
                     job_id=terminal["job_id"],
-                    payload={
-                        "prompt_id": terminal["prompt_id"],
-                        "status": terminal["status"],
-                        "outputs": terminal["outputs"],
-                    },
+                    payload=payload,
                 )
                 await websocket.send(event.model_dump_json())
             heartbeat = HostHeartbeat(
@@ -235,5 +256,6 @@ class AgentClient:
                 cli_workspace, self.settings.comfy_cli_executable
             )
             self.comfy_cli = self.comfy_cli_adapter.discover_info()
+            self.asset_uploader = self._build_asset_uploader()
             return self.registration().model_dump(mode="json")
         raise ValueError(f"unknown action: {action}")
