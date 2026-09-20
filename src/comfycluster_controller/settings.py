@@ -13,6 +13,10 @@ class ControllerSettings(BaseSettings):
     max_asset_bytes: int = 20 * 1024**3
     max_asset_vault_bytes: int = 1024 * 1024**3
     min_asset_free_bytes: int = 20 * 1024**3
+    ffprobe_path: str | None = None
+    ffmpeg_path: str | None = None
+    video_preview_seconds: float = 8.0
+    video_preview_max_size: int = 720
     agent_token: str | None = None
     admin_token: str | None = None
 

@@ -38,4 +38,8 @@ register_asset_routes(
     max_asset_bytes=_settings.max_asset_bytes,
     max_vault_bytes=_settings.max_asset_vault_bytes,
     min_free_bytes=_settings.min_asset_free_bytes,
+    ffprobe_path=_settings.ffprobe_path,
+    ffmpeg_path=_settings.ffmpeg_path,
+    video_preview_seconds=_settings.video_preview_seconds,
+    video_preview_max_size=_settings.video_preview_max_size,
 )

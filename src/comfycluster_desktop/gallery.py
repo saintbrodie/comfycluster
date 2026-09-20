@@ -75,8 +75,37 @@ class OpenAssetWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class PreviewAssetWorker(QThread):
+    ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, api: DesktopApi, asset_id: str) -> None:
+        super().__init__()
+        self.api = api
+        self.asset_id = asset_id
+
+    def run(self) -> None:
+        try:
+            path = self.api.download_preview(self.asset_id)
+            self.ready.emit(str(path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+def _duration_text(seconds: float | int | None) -> str | None:
+    if seconds is None:
+        return None
+    try:
+        total = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return None
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
 class GalleryCard(QFrame):
-    def __init__(self, asset: dict[str, Any], open_callback, details_callback) -> None:
+    def __init__(self, asset: dict[str, Any], open_callback, preview_callback, details_callback) -> None:
         super().__init__()
         self.asset = asset
         self.setObjectName("card")
@@ -93,7 +122,9 @@ class GalleryCard(QFrame):
             "background:#0d0f12;border:1px solid #292d33;border-radius:7px;color:#727985;"
         )
         media = str(asset.get("media_type") or "application/octet-stream")
-        self.preview.setText("IMAGE" if media.startswith("image/") else "VIDEO" if media.startswith("video/") else "FILE")
+        self.preview.setText(
+            "IMAGE" if media.startswith("image/") else "VIDEO" if media.startswith("video/") else "FILE"
+        )
         layout.addWidget(self.preview)
 
         filename = QLabel(str(asset.get("filename") or "output"))
@@ -108,6 +139,7 @@ class GalleryCard(QFrame):
         height = metadata.get("height")
         sampler = (metadata.get("samplers") or [None])[0]
         seed = (metadata.get("seeds") or [None])[0]
+        duration = _duration_text(metadata.get("duration_seconds"))
         details = []
         if models:
             details.append(Path(str(models[0])).name)
@@ -115,6 +147,10 @@ class GalleryCard(QFrame):
             details.append(f"{len(loras)} LoRA" + ("s" if len(loras) != 1 else ""))
         if width and height:
             details.append(f"{width}×{height}")
+        if duration:
+            details.append(duration)
+        if metadata.get("video_codec"):
+            details.append(str(metadata.get("video_codec")).upper())
         if sampler:
             details.append(str(sampler))
         if seed is not None:
@@ -141,6 +177,10 @@ class GalleryCard(QFrame):
         layout.addWidget(footer)
 
         actions = QHBoxLayout()
+        if media.startswith("video/"):
+            preview_button = QPushButton("Preview")
+            preview_button.clicked.connect(lambda: preview_callback(asset))
+            actions.addWidget(preview_button)
         open_button = QPushButton("Open")
         open_button.clicked.connect(lambda: open_callback(asset))
         actions.addWidget(open_button)
@@ -158,6 +198,7 @@ class GalleryPage(QWidget):
         self.facets: dict[str, list[str]] = {}
         self.thumbnail_labels: dict[str, QLabel] = {}
         self.open_workers: set[OpenAssetWorker] = set()
+        self.preview_workers: set[PreviewAssetWorker] = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 24, 26, 24)
@@ -166,14 +207,14 @@ class GalleryPage(QWidget):
         title.setObjectName("title")
         root.addWidget(title)
         subtitle = QLabel(
-            "Private media library with Comfy provenance, model metadata, advanced filtering, and anonymous face groups."
+            "Private media library with Comfy provenance, model metadata, video previews, advanced filtering, and anonymous face groups."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search filenames, prompts, workflows, models, LoRAs, tags…")
+        self.search.setPlaceholderText("Search filenames, prompts, workflows, models, LoRAs, codecs, tags…")
         self.search.textChanged.connect(self.render)
         root.addWidget(self.search)
 
@@ -182,6 +223,7 @@ class GalleryPage(QWidget):
         self.lora_filter = self._combo("All LoRAs")
         self.sampler_filter = self._combo("All samplers")
         self.media_filter = self._combo("All media")
+        self.codec_filter = self._combo("All video codecs")
         self.group_filter = self._combo("All groups")
         self.face_filter = self._combo("All face groups")
         for combo in (
@@ -189,6 +231,7 @@ class GalleryPage(QWidget):
             self.lora_filter,
             self.sampler_filter,
             self.media_filter,
+            self.codec_filter,
             self.group_filter,
             self.face_filter,
         ):
@@ -246,6 +289,7 @@ class GalleryPage(QWidget):
         self._set_combo(self.lora_filter, "All LoRAs", self.facets.get("loras") or [])
         self._set_combo(self.sampler_filter, "All samplers", self.facets.get("samplers") or [])
         self._set_combo(self.media_filter, "All media", self.facets.get("media_families") or [])
+        self._set_combo(self.codec_filter, "All video codecs", self.facets.get("video_codecs") or [])
         self._set_combo(self.group_filter, "All groups", self.facets.get("groups") or [])
         self._set_combo(self.face_filter, "All face groups", self.facets.get("face_clusters") or [])
         self.render()
@@ -257,6 +301,7 @@ class GalleryPage(QWidget):
             self.lora_filter,
             self.sampler_filter,
             self.media_filter,
+            self.codec_filter,
             self.group_filter,
             self.face_filter,
         ):
@@ -269,6 +314,7 @@ class GalleryPage(QWidget):
         lora = self.lora_filter.currentData()
         sampler = self.sampler_filter.currentData()
         media = self.media_filter.currentData()
+        codec = self.codec_filter.currentData()
         group = self.group_filter.currentData()
         face = self.face_filter.currentData()
         if model and model not in (metadata.get("models") or []) + (metadata.get("model_refs") or []):
@@ -278,6 +324,8 @@ class GalleryPage(QWidget):
         if sampler and sampler not in (metadata.get("samplers") or []):
             return False
         if media and not str(asset.get("media_type") or "").startswith(str(media) + "/"):
+            return False
+        if codec and str(metadata.get("video_codec") or "").casefold() != str(codec).casefold():
             return False
         if group and asset.get("group_id") != group:
             return False
@@ -293,6 +341,9 @@ class GalleryPage(QWidget):
                 *(str(value) for value in metadata.get("model_refs") or []),
                 *(str(value) for value in metadata.get("loras") or []),
                 *(str(value) for value in metadata.get("prompts") or []),
+                str(metadata.get("video_codec") or ""),
+                str(metadata.get("audio_codec") or ""),
+                str(metadata.get("container_format") or ""),
             ]
             if not any(q in value.casefold() for value in searchable):
                 return False
@@ -316,11 +367,12 @@ class GalleryPage(QWidget):
             return
         columns = 3
         for index, asset in enumerate(filtered):
-            card = GalleryCard(asset, self.open_asset, self.show_details)
+            card = GalleryCard(asset, self.open_asset, self.preview_asset, self.show_details)
             row, column = divmod(index, columns)
             self.grid.addWidget(card, row, column)
             asset_id = str(asset.get("asset_id") or "")
-            if str(asset.get("media_type") or "").startswith("image/"):
+            media_type = str(asset.get("media_type") or "")
+            if media_type.startswith("image/") or media_type.startswith("video/"):
                 self.thumbnail_labels[asset_id] = card.preview
                 self.thumbnail_worker.enqueue(asset_id)
         self.grid.setRowStretch((len(filtered) + columns - 1) // columns, 1)
@@ -348,8 +400,29 @@ class GalleryPage(QWidget):
         worker.finished.connect(lambda w=worker: self._cleanup_open_worker(w))
         worker.start()
 
+    def preview_asset(self, asset: dict[str, Any]) -> None:
+        asset_id = str(asset.get("asset_id") or "")
+        if not asset_id:
+            return
+        worker = PreviewAssetWorker(self.api, asset_id)
+        self.preview_workers.add(worker)
+        worker.ready.connect(lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        worker.failed.connect(
+            lambda message: QMessageBox.warning(
+                self,
+                "Video preview unavailable",
+                message + "\n\nThe full archived video can still be opened.",
+            )
+        )
+        worker.finished.connect(lambda w=worker: self._cleanup_preview_worker(w))
+        worker.start()
+
     def _cleanup_open_worker(self, worker: OpenAssetWorker) -> None:
         self.open_workers.discard(worker)
+        worker.deleteLater()
+
+    def _cleanup_preview_worker(self, worker: PreviewAssetWorker) -> None:
+        self.preview_workers.discard(worker)
         worker.deleteLater()
 
     def show_details(self, asset: dict[str, Any]) -> None:
@@ -368,6 +441,13 @@ class GalleryPage(QWidget):
             f"Steps: {', '.join(str(v) for v in metadata.get('steps') or []) or '—'}",
             f"CFG: {', '.join(str(v) for v in metadata.get('cfg_scales') or []) or '—'}",
             f"Dimensions: {metadata.get('width') or '?'} × {metadata.get('height') or '?'}",
+            f"Duration: {_duration_text(metadata.get('duration_seconds')) or '—'}",
+            f"Frames: {metadata.get('frame_count') or '—'}",
+            f"Frame rate: {metadata.get('frame_rate') or '—'} fps",
+            f"Video codec: {metadata.get('video_codec') or '—'}",
+            f"Audio codec: {metadata.get('audio_codec') or '—'}",
+            f"Container: {metadata.get('container_format') or '—'}",
+            f"Bit rate: {metadata.get('bit_rate_bps') or '—'} bps",
             f"GPU: {metadata.get('gpu_name') or '—'}",
             f"Runtime: {metadata.get('runtime_seconds') or '—'} s",
             f"Faces: {metadata.get('face_count', 0)}",

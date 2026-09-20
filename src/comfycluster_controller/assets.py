@@ -156,12 +156,17 @@ class AssetRepository:
         sampler: str | None = None,
         scheduler: str | None = None,
         media_family: str | None = None,
+        video_codec: str | None = None,
+        audio_codec: str | None = None,
+        container_format: str | None = None,
         group_id: str | None = None,
         owner_user_id: str | None = None,
         tag: str | None = None,
         face_cluster_id: str | None = None,
         min_width: int | None = None,
         min_height: int | None = None,
+        min_duration_seconds: float | None = None,
+        max_duration_seconds: float | None = None,
         limit: int = 500,
     ) -> list[AssetView]:
         needle = q.casefold().strip() if q else None
@@ -171,6 +176,11 @@ class AssetRepository:
                 return True
             wanted = expected.casefold()
             return any(wanted in value.casefold() for value in values)
+
+        def scalar_contains(value: str | None, expected: str | None) -> bool:
+            if not expected:
+                return True
+            return bool(value and expected.casefold() in value.casefold())
 
         def matches(record: AssetRecord) -> bool:
             metadata = record.metadata
@@ -188,6 +198,12 @@ class AssetRepository:
                 return False
             if not contains(metadata.schedulers, scheduler):
                 return False
+            if not scalar_contains(metadata.video_codec, video_codec):
+                return False
+            if not scalar_contains(metadata.audio_codec, audio_codec):
+                return False
+            if not scalar_contains(metadata.container_format, container_format):
+                return False
             if tag and tag.casefold() not in {value.casefold() for value in metadata.tags}:
                 return False
             if face_cluster_id and face_cluster_id not in metadata.face_cluster_ids:
@@ -196,6 +212,11 @@ class AssetRepository:
                 return False
             if min_height and (metadata.height or 0) < min_height:
                 return False
+            if min_duration_seconds is not None and (metadata.duration_seconds or 0) < min_duration_seconds:
+                return False
+            if max_duration_seconds is not None:
+                if metadata.duration_seconds is None or metadata.duration_seconds > max_duration_seconds:
+                    return False
             if needle:
                 haystack = [
                     record.filename,
@@ -207,6 +228,9 @@ class AssetRepository:
                     *metadata.samplers,
                     *metadata.schedulers,
                     *metadata.prompts,
+                    metadata.video_codec or "",
+                    metadata.audio_codec or "",
+                    metadata.container_format or "",
                 ]
                 if not any(needle in value.casefold() for value in haystack if value):
                     return False
@@ -226,6 +250,14 @@ class AssetRepository:
                 collected.update(str(item) for item in getattr(record.metadata, name) if item)
             return sorted(collected, key=str.casefold)
 
+        def scalar_values(name: str) -> list[str]:
+            collected = {
+                str(value)
+                for record in records
+                if (value := getattr(record.metadata, name))
+            }
+            return sorted(collected, key=str.casefold)
+
         return {
             "models": values("models"),
             "model_refs": values("model_refs"),
@@ -234,6 +266,9 @@ class AssetRepository:
             "schedulers": values("schedulers"),
             "tags": values("tags"),
             "face_clusters": values("face_cluster_ids"),
+            "video_codecs": scalar_values("video_codec"),
+            "audio_codecs": scalar_values("audio_codec"),
+            "container_formats": scalar_values("container_format"),
             "groups": sorted({record.group_id for record in records if record.group_id}),
             "media_families": sorted(
                 {record.media_type.split("/", 1)[0] for record in records if "/" in record.media_type}

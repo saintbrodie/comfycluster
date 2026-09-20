@@ -27,6 +27,11 @@ class AssetMetadata(BaseModel):
     height: int | None = None
     duration_seconds: float | None = None
     frame_count: int | None = None
+    frame_rate: float | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    container_format: str | None = None
+    bit_rate_bps: int | None = None
     host_id: str | None = None
     worker_id: str | None = None
     gpu_name: str | None = None

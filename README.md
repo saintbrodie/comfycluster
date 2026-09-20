@@ -75,7 +75,7 @@ Implemented screens:
 - **Comfy**: detected environment, Comfy version/commit/Python, desired fleet release, drift state, inventory refresh
 - **Models**: cluster model inventory, size/category, whether the model is on this PC, host availability
 - **Custom Nodes**: local commit, host coverage, basic consistency view
-- **Outputs**: private thumbnail gallery backed by the controller asset vault, with model/LoRA/sampler/group/media/anonymous-face filters and free-text provenance search
+- **Outputs**: private thumbnail/poster gallery backed by the controller asset vault, with model/LoRA/sampler/group/media/video-codec/anonymous-face filters, free-text provenance search, and lightweight video previews
 - **Cluster**: registered Windows hosts and their GPU workers, connectivity and drain state
 - **Settings**: controller/local-agent endpoints and direct controller-admin access
 
@@ -83,13 +83,15 @@ The desktop uses the local agent API on `127.0.0.1:9321` for workstation control
 
 ## Private media library
 
-Archived outputs carry searchable Comfy provenance including models/checkpoints, LoRAs, VAEs/CLIPs, sampler, scheduler, seed, steps, CFG, prompt metadata, workflow name/tags, host/GPU/runtime, media type, and image dimensions.
+Archived outputs carry searchable Comfy provenance including models/checkpoints, LoRAs, VAEs/CLIPs, sampler, scheduler, seed, steps, CFG, prompt metadata, workflow name/tags, host/GPU/runtime, media type, and image/video dimensions.
 
-Search and facets are authorization-scoped before results are returned, so one private group cannot discover another group's filenames, prompts, models, LoRAs, tags, or face clusters through the gallery API.
+Video archives can additionally be enriched through optional `ffprobe` discovery with duration, frame count, frame rate, video/audio codecs, container format, and bit rate. Optional `ffmpeg` support generates cached poster frames and short H.264 preview proxies. Missing FFmpeg tooling never prevents the original asset from being archived or opened.
 
-Image thumbnails use a separate authorized endpoint and cache; the gallery does not download full-resolution originals just to render its grid. Full media is retrieved only when the user opens an asset.
+Search and facets are authorization-scoped before results are returned, so one private group cannot discover another group's filenames, prompts, models, LoRAs, codecs, tags, or face clusters through the gallery API.
 
-See `docs/media-library.md` for the metadata/search model and scaling notes.
+The gallery does not download full-resolution originals just to render its grid. Full media is retrieved only when the user opens an asset; video **Preview** uses a short cached proxy instead.
+
+See `docs/media-library.md` for the metadata/search model, FFmpeg settings, and scaling notes.
 
 ## Anonymous face grouping
 
@@ -152,10 +154,11 @@ Tenancy and operations:
 
 Private media:
 
-- `GET /api/v1/assets` with model/LoRA/sampler/scheduler/media/group/tag/face/dimension filters
+- `GET /api/v1/assets` with model/LoRA/sampler/scheduler/media/codec/group/tag/face/dimension/duration filters
 - `GET /api/v1/assets/facets`
 - `GET /api/v1/assets/{asset_id}`
 - `GET /api/v1/assets/{asset_id}/thumbnail`
+- `GET /api/v1/assets/{asset_id}/preview`
 - `GET /api/v1/assets/{asset_id}/content`
 
 ## Implemented agent and controller foundations
@@ -187,7 +190,8 @@ Private media:
 - weighted fair group scheduling and concurrency limits
 - user/group tenancy, memberships, hashed API credentials, and scoped job visibility
 - controller-owned private asset vault with quotas and retention
-- searchable Comfy generation provenance and image thumbnails
+- searchable Comfy generation provenance and image/video thumbnails
+- optional ffprobe video metadata enrichment and ffmpeg poster/proxy derivatives
 - anonymous face-group metadata contract with explicit private-group opt-in
 - optional SQLite persistence and restart recovery behavior
 - desired release and drift planning
@@ -209,7 +213,7 @@ Private media:
 
 1. SSO/OIDC integration so enterprises do not have to manually provision long-lived user tokens
 2. paginated/server-driven media-library search for very large archives
-3. video poster frames, duration/frame metadata, and proxy previews
+3. async media analysis and bounded derivative-cache eviction
 4. optional enterprise-approved local face-grouping analyzer for groups that opt in
 5. canary release reconciliation and rollback
 6. model synchronization with hashing and integrity verification

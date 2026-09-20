@@ -123,7 +123,7 @@ class DesktopApi:
         cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "thumbnails"
         cache_dir.mkdir(parents=True, exist_ok=True)
         destination = cache_dir / f"{asset_id}-{size}.jpg"
-        if destination.is_file():
+        if destination.is_file() and destination.stat().st_size > 0:
             return destination
         headers = self._controller_headers()
         with httpx.Client(timeout=30.0) as client:
@@ -134,6 +134,26 @@ class DesktopApi:
             )
             response.raise_for_status()
             destination.write_bytes(response.content)
+        return destination
+
+    def download_preview(self, asset_id: str) -> Path:
+        cache_dir = Path(tempfile.gettempdir()) / "ComfyCluster" / "previews"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        destination = cache_dir / f"{asset_id}-preview.mp4"
+        if destination.is_file() and destination.stat().st_size > 0:
+            return destination
+        headers = self._controller_headers()
+        timeout = httpx.Timeout(connect=20.0, read=180.0, write=30.0, pool=20.0)
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream(
+                "GET",
+                f"{self.controller_base}/api/v1/assets/{asset_id}/preview",
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_bytes(512 * 1024):
+                        handle.write(chunk)
         return destination
 
     def snapshot(self) -> dict:

@@ -17,6 +17,7 @@ from comfycluster_common.tenancy import Principal
 
 from .asset_metadata import extract_asset_metadata
 from .assets import AssetRepository, principal_can_view_asset
+from .media import generate_video_poster, generate_video_preview, probe_video
 from .security import agent_authorized
 from .store import FleetStore
 
@@ -50,10 +51,16 @@ def register_asset_routes(
     max_asset_bytes: int,
     max_vault_bytes: int,
     min_free_bytes: int,
+    ffprobe_path: str | Path | None = None,
+    ffmpeg_path: str | Path | None = None,
+    video_preview_seconds: float = 8.0,
+    video_preview_max_size: int = 720,
 ) -> None:
     asset_root.mkdir(parents=True, exist_ok=True)
     thumbnail_root = asset_root / ".thumbnails"
+    preview_root = asset_root / ".previews"
     thumbnail_root.mkdir(parents=True, exist_ok=True)
+    preview_root.mkdir(parents=True, exist_ok=True)
     app.state.assets = repository
     app.state.asset_root = asset_root
 
@@ -129,6 +136,10 @@ def register_asset_routes(
                     metadata = metadata.model_copy(
                         update={"width": dimensions[0], "height": dimensions[1]}
                     )
+            elif media_type.startswith("video/"):
+                probe = probe_video(final_path, ffprobe_path=ffprobe_path)
+                if probe:
+                    metadata = metadata.model_copy(update=probe.as_metadata_update())
             record = AssetRecord(
                 asset_id=asset_id,
                 job_id=job_id,
@@ -159,12 +170,17 @@ def register_asset_routes(
         sampler: str | None = None,
         scheduler: str | None = None,
         media_family: str | None = None,
+        video_codec: str | None = None,
+        audio_codec: str | None = None,
+        container_format: str | None = None,
         group_id: str | None = None,
         owner_user_id: str | None = None,
         tag: str | None = None,
         face_cluster_id: str | None = None,
         min_width: int | None = None,
         min_height: int | None = None,
+        min_duration_seconds: float | None = None,
+        max_duration_seconds: float | None = None,
         limit: int = 500,
         principal: Principal = Depends(current_principal),
     ):
@@ -176,12 +192,17 @@ def register_asset_routes(
             sampler=sampler,
             scheduler=scheduler,
             media_family=media_family,
+            video_codec=video_codec,
+            audio_codec=audio_codec,
+            container_format=container_format,
             group_id=group_id,
             owner_user_id=owner_user_id,
             tag=tag,
             face_cluster_id=face_cluster_id,
             min_width=min_width,
             min_height=min_height,
+            min_duration_seconds=min_duration_seconds,
+            max_duration_seconds=max_duration_seconds,
             limit=limit,
         )
 
@@ -217,14 +238,15 @@ def register_asset_routes(
         principal: Principal = Depends(current_principal),
     ):
         record = authorized_asset(asset_id, principal)
-        if not record.media_type.startswith("image/"):
-            raise HTTPException(status_code=415, detail="thumbnail is available for images only")
         source = Path(record.storage_path)
         if not source.is_file():
             raise HTTPException(status_code=410, detail="asset content is no longer available")
         size = max(96, min(size, 1024))
         thumbnail_path = thumbnail_root / f"{asset_id}-{size}.jpg"
-        if not thumbnail_path.is_file() or thumbnail_path.stat().st_mtime < source.stat().st_mtime:
+        if thumbnail_path.is_file() and thumbnail_path.stat().st_mtime >= source.stat().st_mtime:
+            return FileResponse(thumbnail_path, media_type="image/jpeg")
+
+        if record.media_type.startswith("image/"):
             try:
                 with Image.open(source) as image:
                     image = ImageOps.exif_transpose(image)
@@ -241,7 +263,50 @@ def register_asset_routes(
                     image.save(thumbnail_path, "JPEG", quality=82, optimize=True)
             except (OSError, UnidentifiedImageError) as exc:
                 raise HTTPException(status_code=415, detail="unable to create image thumbnail") from exc
+        elif record.media_type.startswith("video/"):
+            created = generate_video_poster(
+                source,
+                thumbnail_path,
+                size=size,
+                duration_seconds=record.metadata.duration_seconds,
+                ffmpeg_path=ffmpeg_path,
+            )
+            if not created:
+                raise HTTPException(
+                    status_code=503,
+                    detail="video poster generation requires a working ffmpeg installation",
+                )
+        else:
+            raise HTTPException(status_code=415, detail="thumbnail is available for images and videos")
         return FileResponse(thumbnail_path, media_type="image/jpeg")
+
+    @app.get("/api/v1/assets/{asset_id}/preview")
+    async def get_asset_preview(
+        asset_id: UUID,
+        principal: Principal = Depends(current_principal),
+    ):
+        record = authorized_asset(asset_id, principal)
+        if not record.media_type.startswith("video/"):
+            raise HTTPException(status_code=415, detail="preview proxy is available for videos only")
+        source = Path(record.storage_path)
+        if not source.is_file():
+            raise HTTPException(status_code=410, detail="asset content is no longer available")
+        preview_path = preview_root / f"{asset_id}-{int(video_preview_seconds)}s-{video_preview_max_size}.mp4"
+        if not preview_path.is_file() or preview_path.stat().st_mtime < source.stat().st_mtime:
+            created = generate_video_preview(
+                source,
+                preview_path,
+                duration_seconds=record.metadata.duration_seconds,
+                preview_seconds=video_preview_seconds,
+                max_size=video_preview_max_size,
+                ffmpeg_path=ffmpeg_path,
+            )
+            if not created:
+                raise HTTPException(
+                    status_code=503,
+                    detail="video preview generation requires ffmpeg with libx264 support",
+                )
+        return FileResponse(preview_path, media_type="video/mp4", filename=f"preview-{record.filename}.mp4")
 
     @app.put("/api/v1/agents/assets/{asset_id}/face-groups", response_model=AssetView)
     async def update_face_groups(
@@ -276,6 +341,12 @@ def register_asset_routes(
             raise HTTPException(status_code=404, detail="asset not found")
         return AssetView.from_record(updated)
 
+    def cleanup_derivatives(asset_id: UUID) -> None:
+        for thumbnail in thumbnail_root.glob(f"{asset_id}-*.jpg"):
+            thumbnail.unlink(missing_ok=True)
+        for preview in preview_root.glob(f"{asset_id}-*.mp4"):
+            preview.unlink(missing_ok=True)
+
     @app.delete("/api/v1/assets/{asset_id}", status_code=204)
     async def delete_asset(
         asset_id: UUID,
@@ -294,8 +365,7 @@ def register_asset_routes(
         removed = repository.delete(asset_id)
         if removed:
             Path(removed.storage_path).unlink(missing_ok=True)
-            for thumbnail in thumbnail_root.glob(f"{asset_id}-*.jpg"):
-                thumbnail.unlink(missing_ok=True)
+            cleanup_derivatives(asset_id)
 
     @app.get("/api/v1/admin/assets/storage")
     async def storage_summary(principal: Principal = Depends(current_principal)):
@@ -352,8 +422,7 @@ def register_asset_routes(
                 removed = repository.delete(record.asset_id)
                 if removed:
                     Path(removed.storage_path).unlink(missing_ok=True)
-                    for thumbnail in thumbnail_root.glob(f"{record.asset_id}-*.jpg"):
-                        thumbnail.unlink(missing_ok=True)
+                    cleanup_derivatives(record.asset_id)
 
         return {
             "dry_run": dry_run,
