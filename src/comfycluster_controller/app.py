@@ -27,6 +27,7 @@ from comfycluster_common.tenancy import (
 
 from .connections import AgentConnectionManager
 from .inventory import compare_release, model_matrix, node_matrix
+from .rate_limit import SlidingWindowRateLimiter
 from .releases import plan_release
 from .scheduler import Scheduler
 from .security import agent_authorized, authenticate_principal
@@ -47,6 +48,7 @@ def create_app(
     app.state.store = store or FleetStore()
     app.state.connections = connections or AgentConnectionManager()
     app.state.scheduler = Scheduler()
+    app.state.submission_limiter = SlidingWindowRateLimiter()
     app.state.dispatch_lock = asyncio.Lock()
     app.state.agent_token = agent_token
     app.state.admin_token = admin_token
@@ -363,12 +365,35 @@ def create_app(
         if group_id:
             if not principal.belongs_to(group_id) and not principal.content_auditor:
                 raise HTTPException(status_code=403, detail="not a member of requested group")
-            if not await app.state.store.get_group(group_id):
-                raise HTTPException(status_code=404, detail="group not found")
         elif len(principal.group_ids) == 1:
             group_id = principal.group_ids[0]
         elif principal.user_id != "dev-admin":
             raise HTTPException(status_code=400, detail="group_id is required")
+
+        if group_id:
+            group = await app.state.store.get_group(group_id)
+            if group is None:
+                raise HTTPException(status_code=404, detail="group not found")
+            if not group.active:
+                raise HTTPException(status_code=409, detail="group is disabled")
+
+        user = await app.state.store.get_user(principal.user_id)
+        if user is not None:
+            allowed, current, retry_after = app.state.submission_limiter.allow(
+                principal.user_id,
+                user.max_submissions_per_minute,
+            )
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "submission_rate_limit_reached",
+                        "limit": user.max_submissions_per_minute,
+                        "current": current,
+                        "retry_after_seconds": max(1, int(retry_after) + 1),
+                    },
+                    headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+                )
 
         request = request.model_copy(update={"group_id": group_id})
         job = JobRecord(
