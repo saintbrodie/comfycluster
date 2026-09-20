@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 from uuid import UUID
 
@@ -33,10 +34,28 @@ def register_asset_routes(
     agent_token: str | None,
     current_principal,
     max_asset_bytes: int,
+    max_vault_bytes: int,
+    min_free_bytes: int,
 ) -> None:
     asset_root.mkdir(parents=True, exist_ok=True)
     app.state.assets = repository
     app.state.asset_root = asset_root
+
+    async def enforce_capacity(job, incoming_bytes: int) -> None:
+        if incoming_bytes > max_asset_bytes:
+            raise HTTPException(status_code=413, detail="asset exceeds per-file size limit")
+        vault_bytes = repository.total_size_bytes()
+        if vault_bytes + incoming_bytes > max_vault_bytes:
+            raise HTTPException(status_code=507, detail="asset vault capacity limit reached")
+        if job.group_id:
+            group = await store.get_group(job.group_id)
+            if group:
+                group_bytes = repository.group_size_bytes(job.group_id)
+                if group_bytes + incoming_bytes > group.policy.max_storage_bytes:
+                    raise HTTPException(status_code=507, detail="group storage quota reached")
+        free_bytes = shutil.disk_usage(asset_root).free
+        if free_bytes - incoming_bytes < min_free_bytes:
+            raise HTTPException(status_code=507, detail="controller minimum free-space reserve reached")
 
     @app.put("/api/v1/agents/jobs/{job_id}/assets/{asset_id}", response_model=AssetView)
     async def upload_asset(
@@ -57,8 +76,9 @@ def register_asset_routes(
             raise HTTPException(status_code=403, detail="job is assigned to another host")
 
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > max_asset_bytes:
-            raise HTTPException(status_code=413, detail="asset exceeds controller size limit")
+        declared_size = int(content_length) if content_length else 0
+        if declared_size:
+            await enforce_capacity(job, declared_size)
 
         safe_name = _safe_filename(filename)
         job_dir = asset_root / str(job_id)
@@ -66,14 +86,23 @@ def register_asset_routes(
         final_path = job_dir / f"{asset_id}_{safe_name}"
         temp_path = final_path.with_suffix(final_path.suffix + ".partial")
         size = 0
+        base_vault_bytes = repository.total_size_bytes()
+        base_group_bytes = repository.group_size_bytes(job.group_id)
+        group = await store.get_group(job.group_id) if job.group_id else None
         try:
             with temp_path.open("wb") as handle:
                 async for chunk in request.stream():
                     size += len(chunk)
                     if size > max_asset_bytes:
+                        raise HTTPException(status_code=413, detail="asset exceeds per-file size limit")
+                    if base_vault_bytes + size > max_vault_bytes:
+                        raise HTTPException(status_code=507, detail="asset vault capacity limit reached")
+                    if group and base_group_bytes + size > group.policy.max_storage_bytes:
+                        raise HTTPException(status_code=507, detail="group storage quota reached")
+                    if shutil.disk_usage(asset_root).free < min_free_bytes:
                         raise HTTPException(
-                            status_code=413,
-                            detail="asset exceeds controller size limit",
+                            status_code=507,
+                            detail="controller minimum free-space reserve reached",
                         )
                     handle.write(chunk)
             os.replace(temp_path, final_path)
