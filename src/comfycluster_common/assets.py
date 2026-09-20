@@ -35,6 +35,13 @@ class AssetMetadata(BaseModel):
     face_cluster_ids: list[str] = Field(default_factory=list)
 
 
+class FaceGroupingUpdate(BaseModel):
+    """Anonymous face clustering result; never carries a person's name or identity."""
+
+    face_count: int = Field(default=0, ge=0)
+    face_cluster_ids: list[str] = Field(default_factory=list)
+
+
 class AssetRecord(BaseModel):
     asset_id: UUID
     job_id: UUID
