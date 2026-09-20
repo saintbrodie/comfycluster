@@ -3,6 +3,7 @@ param(
     [int]$Port = 9320,
     [string]$AgentToken,
     [string]$AdminToken,
+    [string]$AssetRoot,
     [string]$SslCertFile,
     [string]$SslKeyFile,
     [switch]$OpenFirewall,
@@ -58,8 +59,20 @@ $generatedAgentToken = $agentResolved[1]
 $adminTokenLine = $adminResolved[0]
 $generatedAdminToken = $adminResolved[1]
 
+$assetRootLine = $null
+if ($AssetRoot) {
+    $assetRootLine = "COMFYCLUSTER_ASSET_ROOT=$(ConvertTo-DotEnvValue $AssetRoot)"
+} else {
+    $assetRootLine = Find-ExistingSetting $existing "COMFYCLUSTER_ASSET_ROOT"
+    if (-not $assetRootLine) {
+        $AssetRoot = Join-Path $installDir "assets"
+        $assetRootLine = "COMFYCLUSTER_ASSET_ROOT=$(ConvertTo-DotEnvValue $AssetRoot)"
+    }
+}
+
 @(
     "COMFYCLUSTER_DATABASE_PATH=$(ConvertTo-DotEnvValue $databasePath)"
+    $assetRootLine
     $agentTokenLine
     $adminTokenLine
 ) | Set-Content -Encoding UTF8 $configPath
@@ -110,6 +123,7 @@ $wsScheme = if ($SslCertFile) { "wss" } else { "ws" }
 Write-Host "Installed and started '$taskName'."
 Write-Host "Dashboard: ${scheme}://localhost:$Port"
 Write-Host "Agent URL: ${wsScheme}://<controller-host>:$Port/api/v1/agents/ws"
+Write-Host "Private asset vault: configured in $configPath"
 if ($generatedAgentToken) {
     Write-Host "Agent bootstrap token: $generatedAgentToken"
 } elseif ($AgentToken) {
