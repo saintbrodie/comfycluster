@@ -18,6 +18,7 @@ class GroupPolicy(BaseModel):
     weight: float = Field(default=1.0, gt=0)
     max_storage_bytes: int = Field(default=250 * 1024**3, ge=0)
     retention_days: int | None = Field(default=30, ge=1)
+    face_grouping_enabled: bool = False
 
 
 class GroupRecord(BaseModel):
