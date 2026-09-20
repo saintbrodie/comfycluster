@@ -47,13 +47,14 @@ class AgentClient:
         return socket.gethostname().lower()
 
     def _build_asset_uploader(self) -> AssetUploader | None:
-        if not self.comfy:
+        if not self.comfy or not self.settings.archive_outputs:
             return None
         return AssetUploader(
             self.settings.controller_url,
             self.settings.agent_token,
             self.host_id,
             Path(self.comfy.path),
+            delete_after_archive=self.settings.delete_local_outputs_after_archive,
         )
 
     def registration(self) -> HostRegistration:
@@ -76,6 +77,8 @@ class AgentClient:
             "controller_connected": self.controller_connected,
             "controller_url": self.settings.controller_url,
             "local_api": f"http://{self.settings.local_api_host}:{self.settings.local_api_port}",
+            "archive_outputs": self.settings.archive_outputs,
+            "delete_local_outputs_after_archive": self.settings.delete_local_outputs_after_archive,
             "registration": self.registration().model_dump(mode="json"),
         }
 
