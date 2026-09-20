@@ -5,17 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ComfyCluster Admin</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    :root { color-scheme:dark; font-family:Inter,ui-sans-serif,system-ui,sans-serif; }
     body { margin:0; background:#0e0f11; color:#ececec; }
     header { padding:20px 28px; border-bottom:1px solid #2b2d31; display:flex; align-items:center; justify-content:space-between; gap:16px; }
-    h1,h2,h3 { margin:0; }
-    h1 { font-size:22px; } h2 { font-size:17px; margin:24px 0 10px; }
+    h1,h2,h3 { margin:0; } h1 { font-size:22px; } h2 { font-size:17px; margin:24px 0 10px; }
     main { padding:24px 28px 40px; max-width:1400px; margin:auto; }
     .metrics { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
     .metric,.card,.host { background:#17191d; border:1px solid #292c31; border-radius:10px; }
     .metric { padding:15px; } .metric .value { font-size:27px; font-weight:700; margin-top:4px; }
     .muted { color:#9298a1; } .small { font-size:12px; }
     .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .sectionhead { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:24px; margin-bottom:10px; }
+    .sectionhead h2 { margin:0; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:12px; }
     .card { padding:15px; }
     .row { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-top:8px; }
@@ -28,9 +29,7 @@
     .idle { background:#173b2d; color:#82e8b6; } .busy { background:#493914; color:#ffd46e; } .offline,.error { background:#481f24; color:#ff9ca7; }
     .draining { background:#40311e; color:#ffc982; } .tooling { background:#202830; color:#bcd8f4; }
     button,input { border:1px solid #3a3f47; background:#23262c; color:#eee; border-radius:7px; padding:8px 11px; }
-    button { cursor:pointer; } button:hover { background:#2b3037; }
-    button.primary { background:#e87522; border-color:#ef8a42; }
-    button.danger { color:#ffb0b8; }
+    button { cursor:pointer; } button:hover { background:#2b3037; } button.primary { background:#e87522; border-color:#ef8a42; } button.danger { color:#ffb0b8; }
     #login { max-width:520px; margin:70px auto; padding:22px; background:#17191d; border:1px solid #292c31; border-radius:12px; }
     #login input { width:100%; box-sizing:border-box; margin:14px 0 10px; }
     #app { display:none; }
@@ -60,53 +59,56 @@
     <div class="metric"><div class="muted">Queued</div><div class="value" id="queuedCount">0</div></div>
     <div class="metric"><div class="muted">Groups</div><div class="value" id="groupCount">0</div></div>
   </div>
-
-  <h2>Group capacity</h2>
+  <div class="sectionhead"><h2>Group capacity</h2><div class="toolbar"><button onclick="createGroup()">New group</button><button onclick="createUser()">New user</button></div></div>
   <section id="groups" class="grid"></section>
   <h2>Fleet</h2>
   <section id="hosts"></section>
 </main>
 </div>
 <script>
-let adminToken = sessionStorage.getItem('comfyclusterAdminToken') || '';
-function authHeaders(extra={}){ return {...extra,'Authorization':`Bearer ${adminToken}`}; }
-async function api(path, options={}){
-  const response=await fetch(path,{...options,headers:authHeaders(options.headers||{})});
-  if(response.status===401||response.status===403) throw new Error('Administrator authentication failed');
-  if(!response.ok) throw new Error((await response.text())||`HTTP ${response.status}`);
-  return response.status===204?null:response.json();
+let adminToken=sessionStorage.getItem('comfyclusterAdminToken')||'';
+let groupCache=[];
+function authHeaders(extra={}){return {...extra,'Authorization':`Bearer ${adminToken}`};}
+async function api(path,options={}){const response=await fetch(path,{...options,headers:authHeaders(options.headers||{})});if(response.status===401||response.status===403)throw new Error('Administrator authentication failed');if(!response.ok)throw new Error((await response.text())||`HTTP ${response.status}`);return response.status===204?null:response.json();}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
+function cliBadge(h){const cli=h.comfy_cli||{};if(!cli.available)return '<span class="pill offline">CLI unavailable</span>';if(cli.error)return '<span class="pill error">CLI error</span>';return `<span class="pill tooling">CLI ${esc(cli.version||'detected')}</span>`;}
+async function connectAdmin(){adminToken=document.getElementById('token').value.trim();try{const me=await api('/api/v1/me');if(!me.platform_admin)throw new Error('This credential is not a platform administrator');sessionStorage.setItem('comfyclusterAdminToken',adminToken);document.getElementById('login').style.display='none';document.getElementById('app').style.display='block';refresh();}catch(e){document.getElementById('loginError').textContent=e.message;}}
+function logout(){sessionStorage.removeItem('comfyclusterAdminToken');location.reload();}
+async function command(host,action,payload={}){await api(`/api/v1/hosts/${host}/commands/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});setTimeout(refresh,350);}
+async function hostMode(host,action){await api(`/api/v1/hosts/${host}/${action}`,{method:'POST'});setTimeout(refresh,250);}
+async function fleet(action){const hosts=await api('/api/v1/hosts');await Promise.all(hosts.filter(h=>h.connected).map(h=>command(h.host_id,action)));}
+async function setGroupActiveById(groupId,active){const group=groupCache.find(g=>g.group_id===groupId);if(!group)return;await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...group,active})});refresh();}
+async function createGroup(){
+  const group_id=prompt('Group ID, for example creative-east');if(!group_id)return;
+  const name=prompt('Group display name',group_id);if(!name)return;
+  const max_running_jobs=Number(prompt('Maximum concurrent jobs for this group','2'));if(!Number.isFinite(max_running_jobs))return;
+  const max_queued_jobs=Number(prompt('Maximum queued jobs for this group','50'));if(!Number.isFinite(max_queued_jobs))return;
+  const weight=Number(prompt('Fair-share weight','1'));if(!Number.isFinite(weight)||weight<=0)return;
+  await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({group_id,name,policy:{max_running_jobs,max_queued_jobs,weight}})});refresh();
 }
-function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
-function cliBadge(h){ const cli=h.comfy_cli||{}; if(!cli.available)return '<span class="pill offline">CLI unavailable</span>'; if(cli.error)return '<span class="pill error">CLI error</span>'; return `<span class="pill tooling">CLI ${esc(cli.version||'detected')}</span>`; }
-async function connectAdmin(){
-  adminToken=document.getElementById('token').value.trim();
-  try{
-    const me=await api('/api/v1/me');
-    if(!me.platform_admin) throw new Error('This credential is not a platform administrator');
-    sessionStorage.setItem('comfyclusterAdminToken',adminToken);
-    document.getElementById('login').style.display='none'; document.getElementById('app').style.display='block';
-    refresh();
-  }catch(e){ document.getElementById('loginError').textContent=e.message; }
+async function createUser(){
+  const user_id=prompt('User ID');if(!user_id)return;
+  const display_name=prompt('Display name',user_id);if(!display_name)return;
+  const group_id=prompt('Private group ID');if(!group_id)return;
+  const max_running_jobs=Number(prompt('Maximum concurrent jobs for this user','2'));if(!Number.isFinite(max_running_jobs))return;
+  const max_queued_jobs=Number(prompt('Maximum queued jobs for this user','10'));if(!Number.isFinite(max_queued_jobs))return;
+  const max_submissions_per_minute=Number(prompt('Maximum submissions per minute','20'));if(!Number.isFinite(max_submissions_per_minute)||max_submissions_per_minute<1)return;
+  await api('/api/v1/admin/users',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id,display_name,max_running_jobs,max_queued_jobs,max_submissions_per_minute})});
+  await api('/api/v1/admin/memberships',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id,group_id})});
+  const issued=await api(`/api/v1/admin/users/${encodeURIComponent(user_id)}/tokens`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({label:'workstation'})});
+  prompt('Copy this one-time user token into the workstation installer',issued.token);refresh();
 }
-function logout(){ sessionStorage.removeItem('comfyclusterAdminToken'); location.reload(); }
-async function command(host,action,payload={}){ await api(`/api/v1/hosts/${host}/commands/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}); setTimeout(refresh,350); }
-async function hostMode(host,action){ await api(`/api/v1/hosts/${host}/${action}`,{method:'POST'}); setTimeout(refresh,250); }
-async function fleet(action){ const hosts=await api('/api/v1/hosts'); await Promise.all(hosts.filter(h=>h.connected).map(h=>command(h.host_id,action))); }
-async function setGroupActive(group,active){ const updated={...group,active}; await api('/api/v1/admin/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(updated)}); refresh(); }
 async function refresh(){
   try{
-    const [hosts,groups,jobs]=await Promise.all([api('/api/v1/hosts'),api('/api/v1/admin/groups'),api('/api/v1/admin/jobs')]);
-    let gpus=0,busy=0; for(const h of hosts){gpus+=h.gpus.length;busy+=h.workers.filter(w=>w.state==='busy').length;}
-    document.getElementById('hostsCount').textContent=hosts.length; document.getElementById('gpuCount').textContent=gpus; document.getElementById('busyCount').textContent=busy;
-    document.getElementById('queuedCount').textContent=jobs.filter(j=>j.state==='queued').length; document.getElementById('groupCount').textContent=groups.length;
-    document.getElementById('groups').innerHTML=groups.map(g=>{
-      const gj=jobs.filter(j=>j.group_id===g.group_id), running=gj.filter(j=>j.state==='running'||j.state==='dispatching').length, queued=gj.filter(j=>j.state==='queued').length, p=g.policy||{};
-      return `<div class="card"><div class="row"><div><strong>${esc(g.name)}</strong><div class="muted small">${esc(g.group_id)}</div></div><span class="pill ${g.active?'idle':'offline'}">${g.active?'active':'paused'}</span></div><div class="row"><span class="muted">Running</span><strong>${running} / ${p.max_running_jobs??'?'}</strong></div><div class="row"><span class="muted">Queued</span><strong>${queued} / ${p.max_queued_jobs??'?'}</strong></div><div class="row"><span class="muted">Fair-share weight</span><strong>${p.weight??1}</strong></div><div class="row"><span></span><button class="${g.active?'danger':''}" onclick='setGroupActive(${JSON.stringify(g)},${!g.active})'>${g.active?'Pause group':'Resume group'}</button></div></div>`;
-    }).join('')||'<p class="muted">No groups configured.</p>';
-    document.getElementById('hosts').innerHTML=hosts.map(h=>`<div class="host"><div class="hosthead"><div><strong>${esc(h.hostname)}</strong> <span class="muted">${esc(h.os_name)}</span><div class="muted">${h.nodes.length} custom node packages · ${h.models.length} model files</div></div><div class="hostmeta">${cliBadge(h)}${h.draining?'<span class="pill draining">draining</span>':''}<span class="pill ${h.connected?'idle':'offline'}">${h.connected?'connected':'offline'}</span>${h.draining?`<button onclick="hostMode('${esc(h.host_id)}','resume')">Resume</button>`:`<button onclick="hostMode('${esc(h.host_id)}','drain')">Drain</button>`}</div></div><div>${h.workers.map(w=>{const g=h.gpus.find(x=>x.uuid===w.gpu_uuid)||{};return `<div class="gpu"><div><strong>${esc(g.name||w.worker_id)}</strong><div class="muted">GPU ${w.gpu_index} · :${w.port}</div></div><div><span class="pill ${esc(w.state)}">${esc(w.state)}</span></div><div>${esc(g.memory_used_mb||0)} / ${esc(g.memory_total_mb||0)} MB</div><div><button onclick="command('${esc(h.host_id)}','worker.start',{worker_id:'${esc(w.worker_id)}'})">Start</button> <button onclick="command('${esc(h.host_id)}','worker.restart',{worker_id:'${esc(w.worker_id)}'})">Restart</button> <button onclick="command('${esc(h.host_id)}','worker.stop',{worker_id:'${esc(w.worker_id)}'})">Stop</button></div></div>`}).join('')}</div></div>`).join('')||'<p class="muted">No agents connected yet.</p>';
-  }catch(e){ console.error(e); }
+    const [hosts,groups,jobs]=await Promise.all([api('/api/v1/hosts'),api('/api/v1/admin/groups'),api('/api/v1/admin/jobs')]);groupCache=groups;
+    let gpus=0,busy=0;for(const h of hosts){gpus+=h.gpus.length;busy+=h.workers.filter(w=>w.state==='busy').length;}
+    document.getElementById('hostsCount').textContent=hosts.length;document.getElementById('gpuCount').textContent=gpus;document.getElementById('busyCount').textContent=busy;document.getElementById('queuedCount').textContent=jobs.filter(j=>j.state==='queued').length;document.getElementById('groupCount').textContent=groups.length;
+    document.getElementById('groups').innerHTML=groups.map(g=>{const gj=jobs.filter(j=>j.group_id===g.group_id),running=gj.filter(j=>j.state==='running'||j.state==='dispatching').length,queued=gj.filter(j=>j.state==='queued').length,p=g.policy||{};return `<div class="card"><div class="row"><div><strong>${esc(g.name)}</strong><div class="muted small">${esc(g.group_id)}</div></div><span class="pill ${g.active?'idle':'offline'}">${g.active?'active':'paused'}</span></div><div class="row"><span class="muted">Running</span><strong>${running} / ${p.max_running_jobs??'?'}</strong></div><div class="row"><span class="muted">Queued</span><strong>${queued} / ${p.max_queued_jobs??'?'}</strong></div><div class="row"><span class="muted">Fair-share weight</span><strong>${p.weight??1}</strong></div><div class="row"><span></span><button class="group-toggle ${g.active?'danger':''}" data-group="${esc(g.group_id)}" data-active="${g.active?'1':'0'}">${g.active?'Pause group':'Resume group'}</button></div></div>`;}).join('')||'<p class="muted">No groups configured.</p>';
+    document.querySelectorAll('.group-toggle').forEach(button=>{button.onclick=()=>setGroupActiveById(button.dataset.group,button.dataset.active!=='1');});
+    document.getElementById('hosts').innerHTML=hosts.map(h=>`<div class="host"><div class="hosthead"><div><strong>${esc(h.hostname)}</strong> <span class="muted">${esc(h.os_name)}</span><div class="muted">${h.nodes.length} custom node packages · ${h.models.length} model files</div></div><div class="hostmeta">${cliBadge(h)}${h.draining?'<span class="pill draining">draining</span>':''}<span class="pill ${h.connected?'idle':'offline'}">${h.connected?'connected':'offline'}</span>${h.draining?`<button onclick="hostMode('${esc(h.host_id)}','resume')">Resume</button>`:`<button onclick="hostMode('${esc(h.host_id)}','drain')">Drain</button>`}</div></div><div>${h.workers.map(w=>{const gpu=h.gpus.find(x=>x.uuid===w.gpu_uuid)||{};return `<div class="gpu"><div><strong>${esc(gpu.name||w.worker_id)}</strong><div class="muted">GPU ${w.gpu_index} · :${w.port}</div></div><div><span class="pill ${esc(w.state)}">${esc(w.state)}</span></div><div>${esc(gpu.memory_used_mb||0)} / ${esc(gpu.memory_total_mb||0)} MB</div><div><button onclick="command('${esc(h.host_id)}','worker.start',{worker_id:'${esc(w.worker_id)}'})">Start</button> <button onclick="command('${esc(h.host_id)}','worker.restart',{worker_id:'${esc(w.worker_id)}'})">Restart</button> <button onclick="command('${esc(h.host_id)}','worker.stop',{worker_id:'${esc(w.worker_id)}'})">Stop</button></div></div>`}).join('')}</div></div>`).join('')||'<p class="muted">No agents connected yet.</p>';
+  }catch(e){console.error(e);}
 }
-if(adminToken){ document.getElementById('token').value=adminToken; connectAdmin(); }
+if(adminToken){document.getElementById('token').value=adminToken;connectAdmin();}
 setInterval(()=>{if(document.getElementById('app').style.display==='block')refresh();},3000);
 </script>
 </body>
