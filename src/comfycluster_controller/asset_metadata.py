@@ -38,7 +38,10 @@ def _classify_model(key: str, class_type: str, value: str, buckets: dict[str, li
         buckets["vaes"].append(value)
     elif "clip" in folded_key or "clip" in folded_class:
         buckets["clips"].append(value)
-    elif any(token in folded_key or token in folded_class for token in ("ckpt", "checkpoint", "unet", "model")):
+    elif any(
+        token in folded_key or token in folded_class
+        for token in ("ckpt", "checkpoint", "unet", "model")
+    ):
         buckets["models"].append(value)
 
 
@@ -88,10 +91,15 @@ def extract_asset_metadata(job: JobRecord) -> AssetMetadata:
                 elif folded == "scheduler":
                     buckets["schedulers"].append(value)
                 if folded in _PROMPT_KEYS and (
-                    "text" in class_type.casefold() or "prompt" in folded or folded in {"positive", "negative"}
+                    "text" in class_type.casefold()
+                    or "prompt" in folded
+                    or folded in {"positive", "negative"}
                 ):
                     buckets["prompts"].append(value[:20000])
             if isinstance(raw_value, bool):
+                continue
+            if isinstance(raw_value, (int, float)) and folded in {"cfg", "cfg_scale"}:
+                cfg_scales.append(float(raw_value))
                 continue
             if isinstance(raw_value, int):
                 if "seed" in folded:
@@ -102,10 +110,6 @@ def extract_asset_metadata(job: JobRecord) -> AssetMetadata:
                     widths.append(raw_value)
                 elif folded == "height" and raw_value > 0:
                     heights.append(raw_value)
-            elif isinstance(raw_value, float) and folded in {"cfg", "cfg_scale"}:
-                cfg_scales.append(raw_value)
-            elif isinstance(raw_value, int) and folded in {"cfg", "cfg_scale"}:
-                cfg_scales.append(float(raw_value))
 
     request_metadata = job.request.metadata or {}
     tags = request_metadata.get("tags") or []
