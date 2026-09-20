@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QThread, QUrl, Signal, Qt
@@ -182,9 +183,10 @@ class MainWindow(QMainWindow):
         )
         self.outputs_table = self._table_page(
             "Outputs",
-            "Only jobs and outputs authorized for your account and private groups are shown.",
-            ["State", "Created", "Host", "Worker", "Outputs", "Job"],
+            "Archived files authorized for your account and private groups. Double-click to open.",
+            ["File", "Type", "Size", "Group", "Created", "Job"],
         )
+        self.outputs_table.cellDoubleClicked.connect(self.open_output_asset)
         self.cluster_layout = self._scroll_page(
             "Cluster", "Windows hosts and GPU workers visible to your account."
         )
@@ -586,21 +588,30 @@ class MainWindow(QMainWindow):
         self._set_table(self.nodes_table, rows)
 
     def _render_outputs(self) -> None:
-        rows = []
-        for job in (self.snapshot.get("jobs") or [])[:100]:
-            outputs = job.get("outputs") or {}
-            count = len(outputs)
-            rows.append(
-                [
-                    str(job.get("state") or ""),
-                    str(job.get("created_at") or "").replace("T", " ")[:19],
-                    str(job.get("assigned_host_id") or ""),
-                    str(job.get("assigned_worker_id") or ""),
-                    str(count),
-                    str(job.get("job_id") or "")[:12],
-                ]
-            )
-        self._set_table(self.outputs_table, rows)
+        assets = (self.snapshot.get("assets") or [])[:250]
+        self.outputs_table.setRowCount(len(assets))
+        for row_index, asset in enumerate(assets):
+            media_type = str(asset.get("media_type") or "application/octet-stream")
+            media_family = media_type.split("/", 1)[0].title() if "/" in media_type else media_type
+            values = [
+                str(asset.get("filename") or "output"),
+                media_family,
+                fmt_size(asset.get("size_bytes")),
+                str(asset.get("group_id") or "Private"),
+                str(asset.get("created_at") or "").replace("T", " ")[:19],
+                str(asset.get("job_id") or "")[:12],
+            ]
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column_index == 0:
+                    item.setData(
+                        Qt.ItemDataRole.UserRole,
+                        {
+                            "asset_id": str(asset.get("asset_id") or ""),
+                            "filename": str(asset.get("filename") or "output.bin"),
+                        },
+                    )
+                self.outputs_table.setItem(row_index, column_index, item)
 
     def _render_cluster(self) -> None:
         clear_layout(self.cluster_layout)
@@ -661,11 +672,17 @@ class MainWindow(QMainWindow):
         clear_layout(self.settings_layout)
         card = Card()
         me = self.snapshot.get("me") or {}
+        local = self.snapshot.get("local") or {}
         for key, value in (
             ("Signed in as", me.get("display_name") or "Not signed in"),
             ("Controller", self.snapshot.get("controller_base") or ""),
             ("Local agent API", self.settings.local_api_url),
             ("Host ID", self.snapshot.get("host_id") or self.settings.host_id),
+            ("Central output archive", "Enabled" if local.get("archive_outputs", True) else "Disabled"),
+            (
+                "Delete local after archive",
+                "Enabled" if local.get("delete_local_outputs_after_archive") else "Disabled",
+            ),
             ("Refresh interval", f"{self.settings.desktop_refresh_seconds:.1f} seconds"),
         ):
             row = QHBoxLayout()
@@ -734,6 +751,30 @@ class MainWindow(QMainWindow):
             self._show_action_error("Local host is not registered with the controller yet.")
             return
         self._run_action(lambda: self.api.host_mode(str(target), operation))
+
+    def open_output_asset(self, row: int, _column: int) -> None:
+        item = self.outputs_table.item(row, 0)
+        payload = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not isinstance(payload, dict):
+            return
+        asset_id = str(payload.get("asset_id") or "")
+        filename = str(payload.get("filename") or "output.bin")
+        if not asset_id:
+            return
+
+        runner = ActionRunner(lambda: self.api.download_asset(asset_id, filename))
+        self.runners.add(runner)
+        runner.succeeded.connect(self._open_downloaded_asset)
+        runner.failed.connect(self._show_action_error)
+        runner.finished.connect(lambda r=runner: self._cleanup_runner(r))
+        runner.start()
+
+    def _open_downloaded_asset(self, path: object) -> None:
+        local_path = Path(str(path))
+        if not local_path.is_file():
+            self._show_action_error("The downloaded output is no longer available.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(local_path)))
 
     def open_local_comfy(self) -> None:
         workers = self._registration().get("workers") or []
