@@ -88,11 +88,14 @@ class AssetUploader:
         agent_token: str | None,
         host_id: str,
         comfy_home: Path,
+        *,
+        delete_after_archive: bool = False,
     ) -> None:
         self.base_url = controller_http_base(controller_url)
         self.agent_token = agent_token
         self.host_id = host_id
         self.comfy_home = comfy_home
+        self.delete_after_archive = delete_after_archive
 
     async def upload_job_outputs(self, job_id: UUID, outputs: dict[str, Any]) -> list[dict[str, Any]]:
         files = discover_output_files(self.comfy_home, outputs)
@@ -125,5 +128,15 @@ class AssetUploader:
                     headers=request_headers,
                 )
                 response.raise_for_status()
-                uploaded.append(response.json())
+                archived = response.json()
+                if str(archived.get("asset_id")) != str(asset_id):
+                    raise ValueError("controller returned unexpected asset id")
+                if int(archived.get("size_bytes") or -1) != file_size:
+                    raise ValueError("controller returned unexpected archived asset size")
+
+                source_deleted = False
+                if self.delete_after_archive:
+                    item.path.unlink()
+                    source_deleted = True
+                uploaded.append({**archived, "source_deleted": source_deleted})
         return uploaded
