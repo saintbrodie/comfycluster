@@ -97,6 +97,7 @@ class DesktopApi:
             "models": [],
             "nodes": [],
             "jobs": [],
+            "assets": [],
             "queue_summary": None,
             "desired_release": None,
             "release_plan": None,
@@ -117,6 +118,7 @@ class DesktopApi:
             snapshot["models"] = self._controller_get("/api/v1/models")
             snapshot["nodes"] = self._controller_get("/api/v1/nodes")
             snapshot["jobs"] = self._controller_get("/api/v1/jobs")
+            snapshot["assets"] = self._controller_optional("/api/v1/assets") or []
             snapshot["queue_summary"] = self._controller_get("/api/v1/queue/summary")
             snapshot["desired_release"] = self._controller_optional("/api/v1/releases/desired")
             snapshot["release_plan"] = self._controller_optional("/api/v1/releases/plan")
