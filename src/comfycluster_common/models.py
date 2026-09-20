@@ -167,15 +167,26 @@ class JobRecord(BaseModel):
     state: JobState = JobState.QUEUED
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     owner_user_id: str | None = None
     group_id: str | None = None
     visibility: JobVisibility = JobVisibility.GROUP
     assigned_host_id: str | None = None
     assigned_worker_id: str | None = None
+    assigned_gpu_uuid: str | None = None
+    assigned_gpu_name: str | None = None
+    assigned_gpu_memory_mb: int | None = None
     comfy_prompt_id: str | None = None
     error: str | None = None
     outputs: dict[str, Any] = Field(default_factory=dict)
     request: JobSubmitRequest
+
+    @property
+    def runtime_seconds(self) -> float | None:
+        if not self.started_at or not self.completed_at:
+            return None
+        return max(0.0, (self.completed_at - self.started_at).total_seconds())
 
 
 class JobSummary(BaseModel):
@@ -183,11 +194,16 @@ class JobSummary(BaseModel):
     state: JobState
     created_at: datetime
     updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    runtime_seconds: float | None = None
     owner_user_id: str | None = None
     group_id: str | None = None
     visibility: JobVisibility = JobVisibility.GROUP
     assigned_host_id: str | None = None
     assigned_worker_id: str | None = None
+    assigned_gpu_uuid: str | None = None
+    assigned_gpu_name: str | None = None
     error: str | None = None
     output_count: int = 0
 
@@ -199,11 +215,16 @@ class JobSummary(BaseModel):
             state=job.state,
             created_at=job.created_at,
             updated_at=job.updated_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            runtime_seconds=job.runtime_seconds,
             owner_user_id=job.owner_user_id,
             group_id=job.group_id,
             visibility=job.visibility,
             assigned_host_id=job.assigned_host_id,
             assigned_worker_id=job.assigned_worker_id,
+            assigned_gpu_uuid=job.assigned_gpu_uuid,
+            assigned_gpu_name=job.assigned_gpu_name,
             error=job.error,
             output_count=output_count,
         )
