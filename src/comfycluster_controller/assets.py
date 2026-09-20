@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections import defaultdict
 from pathlib import Path
 from uuid import UUID
 
@@ -15,6 +16,8 @@ class AssetRepository:
     def __init__(self, database_path: str | Path | None = None) -> None:
         self._records: dict[UUID, AssetRecord] = {}
         self._lock = threading.RLock()
+        self._reserved_total_bytes = 0
+        self._reserved_group_bytes: dict[str, int] = defaultdict(int)
         self._db: sqlite3.Connection | None = None
         if database_path:
             path = Path(database_path)
@@ -35,6 +38,48 @@ class AssetRepository:
                 record = AssetRecord.model_validate_json(raw)
                 self._records[record.asset_id] = record
 
+    def _total_size_unlocked(self) -> int:
+        return sum(max(0, record.size_bytes) for record in self._records.values())
+
+    def _group_size_unlocked(self, group_id: str | None) -> int:
+        return sum(
+            max(0, record.size_bytes)
+            for record in self._records.values()
+            if record.group_id == group_id
+        )
+
+    def reserve_capacity(
+        self,
+        group_id: str | None,
+        size_bytes: int,
+        *,
+        max_vault_bytes: int,
+        max_group_bytes: int | None,
+    ) -> str | None:
+        """Atomically reserve expected upload bytes and return a rejection reason if full."""
+        with self._lock:
+            if self._total_size_unlocked() + self._reserved_total_bytes + size_bytes > max_vault_bytes:
+                return "asset vault capacity limit reached"
+            if group_id and max_group_bytes is not None:
+                used = self._group_size_unlocked(group_id)
+                reserved = self._reserved_group_bytes[group_id]
+                if used + reserved + size_bytes > max_group_bytes:
+                    return "group storage quota reached"
+            self._reserved_total_bytes += size_bytes
+            if group_id:
+                self._reserved_group_bytes[group_id] += size_bytes
+            return None
+
+    def release_capacity(self, group_id: str | None, size_bytes: int) -> None:
+        with self._lock:
+            self._reserved_total_bytes = max(0, self._reserved_total_bytes - size_bytes)
+            if group_id:
+                remaining = max(0, self._reserved_group_bytes[group_id] - size_bytes)
+                if remaining:
+                    self._reserved_group_bytes[group_id] = remaining
+                else:
+                    self._reserved_group_bytes.pop(group_id, None)
+
     def create(self, record: AssetRecord) -> AssetRecord:
         with self._lock:
             self._records[record.asset_id] = record.model_copy(deep=True)
@@ -53,15 +98,11 @@ class AssetRepository:
 
     def total_size_bytes(self) -> int:
         with self._lock:
-            return sum(max(0, record.size_bytes) for record in self._records.values())
+            return self._total_size_unlocked()
 
     def group_size_bytes(self, group_id: str | None) -> int:
         with self._lock:
-            return sum(
-                max(0, record.size_bytes)
-                for record in self._records.values()
-                if record.group_id == group_id
-            )
+            return self._group_size_unlocked(group_id)
 
     def user_size_bytes(self, user_id: str | None) -> int:
         with self._lock:
