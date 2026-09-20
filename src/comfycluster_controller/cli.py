@@ -31,11 +31,24 @@ def serve(
         os.environ["COMFYCLUSTER_DATABASE_PATH"] = database
     if bool(ssl_certfile) != bool(ssl_keyfile):
         raise typer.BadParameter("--ssl-certfile and --ssl-keyfile must be supplied together")
+
+    if reload:
+        uvicorn.run(
+            "comfycluster_controller.runtime_app:app",
+            host=host,
+            port=port,
+            reload=True,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
+        )
+        return
+
+    from .runtime_app import app as controller_app
+
     uvicorn.run(
-        "comfycluster_controller.app:app",
+        controller_app,
         host=host,
         port=port,
-        reload=reload,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
     )
