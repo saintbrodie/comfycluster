@@ -7,24 +7,36 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Body, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from comfycluster_common.assets import AssetRecord, AssetView
+from comfycluster_common.assets import AssetRecord, AssetView, FaceGroupingUpdate
 from comfycluster_common.models import utcnow
 from comfycluster_common.tenancy import Principal
 
+from .asset_metadata import extract_asset_metadata
 from .assets import AssetRepository, principal_can_view_asset
 from .security import agent_authorized
 from .store import FleetStore
 
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
+_FACE_CLUSTER_ID = re.compile(r"^face_[0-9a-f]{12,64}$")
 
 
 def _safe_filename(filename: str) -> str:
     name = Path(filename).name.strip()
     name = _SAFE_FILENAME.sub("_", name)
     return name[:220] or "output.bin"
+
+
+def _image_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(image)
+            return image.size
+    except (OSError, UnidentifiedImageError):
+        return None
 
 
 def register_asset_routes(
@@ -40,6 +52,8 @@ def register_asset_routes(
     min_free_bytes: int,
 ) -> None:
     asset_root.mkdir(parents=True, exist_ok=True)
+    thumbnail_root = asset_root / ".thumbnails"
+    thumbnail_root.mkdir(parents=True, exist_ok=True)
     app.state.assets = repository
     app.state.asset_root = asset_root
 
@@ -107,6 +121,14 @@ def register_asset_routes(
                 raise HTTPException(status_code=400, detail="asset size did not match content-length")
 
             os.replace(temp_path, final_path)
+            metadata = extract_asset_metadata(job)
+            media_type = request.headers.get("content-type") or "application/octet-stream"
+            if media_type.startswith("image/"):
+                dimensions = _image_dimensions(final_path)
+                if dimensions:
+                    metadata = metadata.model_copy(
+                        update={"width": dimensions[0], "height": dimensions[1]}
+                    )
             record = AssetRecord(
                 asset_id=asset_id,
                 job_id=job_id,
@@ -114,9 +136,10 @@ def register_asset_routes(
                 group_id=job.group_id,
                 visibility=job.visibility,
                 filename=safe_name,
-                media_type=request.headers.get("content-type") or "application/octet-stream",
+                media_type=media_type,
                 size_bytes=size,
                 node_id=node_id,
+                metadata=metadata,
                 storage_path=str(final_path),
             )
             stored = repository.create(record)
@@ -129,8 +152,42 @@ def register_asset_routes(
                 final_path.unlink(missing_ok=True)
 
     @app.get("/api/v1/assets", response_model=list[AssetView])
-    async def list_assets(principal: Principal = Depends(current_principal)):
-        return repository.list_for_principal(principal)
+    async def list_assets(
+        q: str | None = None,
+        model: str | None = None,
+        lora: str | None = None,
+        sampler: str | None = None,
+        scheduler: str | None = None,
+        media_family: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        tag: str | None = None,
+        face_cluster_id: str | None = None,
+        min_width: int | None = None,
+        min_height: int | None = None,
+        limit: int = 500,
+        principal: Principal = Depends(current_principal),
+    ):
+        return repository.query_for_principal(
+            principal,
+            q=q,
+            model=model,
+            lora=lora,
+            sampler=sampler,
+            scheduler=scheduler,
+            media_family=media_family,
+            group_id=group_id,
+            owner_user_id=owner_user_id,
+            tag=tag,
+            face_cluster_id=face_cluster_id,
+            min_width=min_width,
+            min_height=min_height,
+            limit=limit,
+        )
+
+    @app.get("/api/v1/assets/facets")
+    async def asset_facets(principal: Principal = Depends(current_principal)):
+        return repository.facets_for_principal(principal)
 
     def authorized_asset(asset_id: UUID, principal: Principal) -> AssetRecord:
         record = repository.get(asset_id)
@@ -153,6 +210,69 @@ def register_asset_routes(
             raise HTTPException(status_code=410, detail="asset content is no longer available")
         return FileResponse(path, media_type=record.media_type, filename=record.filename)
 
+    @app.get("/api/v1/assets/{asset_id}/thumbnail")
+    async def get_asset_thumbnail(
+        asset_id: UUID,
+        size: int = 320,
+        principal: Principal = Depends(current_principal),
+    ):
+        record = authorized_asset(asset_id, principal)
+        if not record.media_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="thumbnail is available for images only")
+        source = Path(record.storage_path)
+        if not source.is_file():
+            raise HTTPException(status_code=410, detail="asset content is no longer available")
+        size = max(96, min(size, 1024))
+        thumbnail_path = thumbnail_root / f"{asset_id}-{size}.jpg"
+        if not thumbnail_path.is_file() or thumbnail_path.stat().st_mtime < source.stat().st_mtime:
+            try:
+                with Image.open(source) as image:
+                    image = ImageOps.exif_transpose(image)
+                    image.thumbnail((size, size))
+                    if image.mode not in {"RGB", "L"}:
+                        background = Image.new("RGB", image.size, "black")
+                        if "A" in image.getbands():
+                            background.paste(image, mask=image.getchannel("A"))
+                        else:
+                            background.paste(image)
+                        image = background
+                    elif image.mode == "L":
+                        image = image.convert("RGB")
+                    image.save(thumbnail_path, "JPEG", quality=82, optimize=True)
+            except (OSError, UnidentifiedImageError) as exc:
+                raise HTTPException(status_code=415, detail="unable to create image thumbnail") from exc
+        return FileResponse(thumbnail_path, media_type="image/jpeg")
+
+    @app.put("/api/v1/agents/assets/{asset_id}/face-groups", response_model=AssetView)
+    async def update_face_groups(
+        asset_id: UUID,
+        update: FaceGroupingUpdate = Body(...),
+        host_id: str | None = None,
+        authorization: str | None = Header(default=None),
+    ):
+        if not agent_authorized(authorization, agent_token):
+            raise HTTPException(status_code=401, detail="unauthorized agent")
+        record = repository.get(asset_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        job = await store.get_job(record.job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if host_id and job.assigned_host_id and host_id != job.assigned_host_id:
+            raise HTTPException(status_code=403, detail="job is assigned to another host")
+        if any(not _FACE_CLUSTER_ID.fullmatch(value) for value in update.face_cluster_ids):
+            raise HTTPException(status_code=400, detail="face cluster IDs must be opaque hashes")
+        metadata = record.metadata.model_copy(
+            update={
+                "face_count": update.face_count,
+                "face_cluster_ids": sorted(set(update.face_cluster_ids)),
+            }
+        )
+        updated = repository.update_metadata(asset_id, metadata)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        return AssetView.from_record(updated)
+
     @app.delete("/api/v1/assets/{asset_id}", status_code=204)
     async def delete_asset(
         asset_id: UUID,
@@ -171,6 +291,8 @@ def register_asset_routes(
         removed = repository.delete(asset_id)
         if removed:
             Path(removed.storage_path).unlink(missing_ok=True)
+            for thumbnail in thumbnail_root.glob(f"{asset_id}-*.jpg"):
+                thumbnail.unlink(missing_ok=True)
 
     @app.get("/api/v1/admin/assets/storage")
     async def storage_summary(principal: Principal = Depends(current_principal)):
@@ -227,6 +349,8 @@ def register_asset_routes(
                 removed = repository.delete(record.asset_id)
                 if removed:
                     Path(removed.storage_path).unlink(missing_ok=True)
+                    for thumbnail in thumbnail_root.glob(f"{record.asset_id}-*.jpg"):
+                        thumbnail.unlink(missing_ok=True)
 
         return {
             "dry_run": dry_run,
