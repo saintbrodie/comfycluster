@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -56,8 +57,8 @@ def _asset(root: Path, *, group_id: str, age_days: int, name: str) -> AssetRecor
         media_type="application/octet-stream",
         size_bytes=path.stat().st_size,
         storage_path=str(path),
-        created_at=utcnow().replace(microsecond=0),
-    ).model_copy(update={"created_at": utcnow() - __import__("datetime").timedelta(days=age_days)})
+        created_at=utcnow() - timedelta(days=age_days),
+    )
 
 
 def test_retention_cleanup_dry_run_then_delete(tmp_path: Path):
