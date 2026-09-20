@@ -10,6 +10,10 @@ param(
 
     [string]$ComfyCliExecutable,
 
+    [switch]$DisableOutputArchive,
+
+    [switch]$DeleteLocalOutputsAfterArchive,
+
     [string]$AgentExe = ".\comfycluster-agent.exe",
 
     [string]$DesktopExe = ".\ComfyCluster.exe",
@@ -85,6 +89,20 @@ if ($ComfyCliExecutable) {
     if ($line) { $config += $line }
 }
 
+if ($DisableOutputArchive) {
+    $config += "COMFYCLUSTER_ARCHIVE_OUTPUTS='false'"
+} else {
+    $line = Find-ExistingSetting $existing "COMFYCLUSTER_ARCHIVE_OUTPUTS"
+    if ($line) { $config += $line }
+}
+
+if ($DeleteLocalOutputsAfterArchive) {
+    $config += "COMFYCLUSTER_DELETE_LOCAL_OUTPUTS_AFTER_ARCHIVE='true'"
+} else {
+    $line = Find-ExistingSetting $existing "COMFYCLUSTER_DELETE_LOCAL_OUTPUTS_AFTER_ARCHIVE"
+    if ($line) { $config += $line }
+}
+
 foreach ($settingName in @("COMFYCLUSTER_LOCAL_API_HOST", "COMFYCLUSTER_LOCAL_API_PORT", "COMFYCLUSTER_DESKTOP_REFRESH_SECONDS")) {
     $line = Find-ExistingSetting $existing $settingName
     if ($line) { $config += $line }
@@ -132,6 +150,8 @@ Write-Host "Installed and started '$taskName'."
 Write-Host "Agent: $targetExe"
 Write-Host "Config: $configPath"
 Write-Host "Controller: $ControllerUrl"
+Write-Host "Central output archive: $(-not $DisableOutputArchive)"
+Write-Host "Delete local output after verified archive: $($DeleteLocalOutputsAfterArchive.IsPresent)"
 if ($UserToken) {
     Write-Host "Desktop user identity: configured"
 }
