@@ -15,6 +15,8 @@ class AgentSettings(BaseSettings):
     base_port: int = 8188
     heartbeat_seconds: float = 5.0
     autostart_workers: bool = True
+    archive_outputs: bool = True
+    delete_local_outputs_after_archive: bool = False
     mock_gpus: int = 0
     local_api_host: str = "127.0.0.1"
     local_api_port: int = 9321
